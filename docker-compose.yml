@@ -1,0 +1,16 @@
+# Uruchamianie: docker compose run --rm radplume radplume run-all
+services:
+  radplume:
+    build: .
+    image: radplume:local
+    working_dir: /app
+    # Montujemy repozytorium: zmiany w kodzie działają bez przebudowy obrazu,
+    # a wyniki (katalog data/) lądują na Twoim dysku, nie znikają z kontenerem.
+    volumes:
+      - .:/app
+    environment:
+      RADPLUME_ENV: local
+    # Spark UI (podgląd zadań w przeglądarce: http://localhost:4040) — działa,
+    # gdy uruchomisz komendę przez `docker compose run --service-ports ...`.
+    ports:
+      - "4040:4040"

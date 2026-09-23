@@ -1,0 +1,32 @@
+# =============================================================================
+# Środowisko DEV — workspace Databricks (plan 4.1–4.2).
+# Ten sam kod co lokalnie; zmienia się tylko miejsce przechowywania i skala.
+# =============================================================================
+storage:
+  mode: catalog
+  catalog: radplume_dev
+  # Volume Unity Catalog na pliki surowe (landing). Na Databricks ścieżki
+  # /Volumes/... są widoczne jak zwykły system plików, więc kod ingestu
+  # (open(), Path) działa bez zmian.
+  landing_root: /Volumes/radplume_dev/raw/landing
+  checkpoint_root: /Volumes/radplume_dev/raw/checkpoints
+
+run:
+  sites: [fukushima_daiichi, lubiatowo_kopalino]
+  seed: 42
+  grid_size: 51
+  cell_km: 4.0
+  climatology:
+    meteo_range: ["2005-01-01", "2024-12-31"]
+    n_episodes: 20
+    episode_hours: 24
+  n_param_scenarios: 3
+  n_source_samples: 50
+
+sources:
+  meteo: open_meteo
+  cities: geonames
+
+sensor_sim:
+  minutes: 180
+  realtime_sleep_s: 0.0

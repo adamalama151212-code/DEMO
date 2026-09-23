@@ -1,0 +1,30 @@
+# =============================================================================
+# Środowisko PROD — płatny workspace, deploy wyłącznie przez CI (plan 4.1, 4.9).
+# Skala według P20: siatka 100×100 po 2 km (±100 km), 200 epizodów,
+# 5 wariantów fizycznych. Koszt przebiegu zmierzyć najpierw na DEV.
+# =============================================================================
+storage:
+  mode: catalog
+  catalog: radplume_prod
+  landing_root: /Volumes/radplume_prod/raw/landing
+  checkpoint_root: /Volumes/radplume_prod/raw/checkpoints
+
+run:
+  sites: [fukushima_daiichi, fukushima_daini, tokai, lubiatowo_kopalino]
+  seed: 42
+  grid_size: 101
+  cell_km: 2.0
+  climatology:
+    meteo_range: ["2005-01-01", "2024-12-31"]
+    n_episodes: 200
+    episode_hours: 24
+  n_param_scenarios: 5
+  n_source_samples: 100
+
+sources:
+  meteo: open_meteo
+  cities: geonames
+
+sensor_sim:
+  minutes: 180
+  realtime_sleep_s: 0.0

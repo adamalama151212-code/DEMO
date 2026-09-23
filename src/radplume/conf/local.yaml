@@ -1,0 +1,62 @@
+# =============================================================================
+# Środowisko LOCAL — PoC na laptopie / w Dockerze.
+#
+# Zasada przenaszalności (plan 3.1, 4.2): różnica między local / dev / prod to
+# WYŁĄCZNIE ten plik. Kod jest identyczny. Jeśli kusi Cię `if env == "local"`
+# w logice transformacji — to znak, że parametr powinien trafić tutaj.
+# =============================================================================
+storage:
+  # path    = tabele Delta jako katalogi na dysku (lokalnie nie ma Unity Catalog)
+  # catalog = tabele w Unity Catalog `catalog.schema.table` (Databricks)
+  mode: path
+  # katalog z danymi; można nadpisać zmienną środowiskową RADPLUME_DATA_DIR
+  root: data
+
+spark:
+  # local[*] = wszystkie rdzenie laptopa. Na Databricks sekcja jest ignorowana,
+  # bo sesję dostarcza klaster.
+  master: "local[*]"
+  # Domyślne 200 partycji shuffle to za dużo dla laptopa: tysiące mikro-zadań
+  # i narzut większy niż praca. 8 wystarcza dla kilku milionów wierszy.
+  shuffle_partitions: 8
+  driver_memory: "4g"
+  # Delta domyślnie czyta log transakcji w 50 partycjach — lokalnie to czysty narzut.
+  delta_snapshot_partitions: 2
+
+run:
+  # Lokalizacje liczone w tym środowisku (definicje w sites.yaml).
+  sites: [fukushima_daiichi, lubiatowo_kopalino]
+  seed: 42
+
+  # Siatka: NIEPARZYSTA liczba komórek, żeby źródło leżało w środku komórki.
+  # 41 × 5 km = zasięg ±100 km — tyle samo co w PROD, tylko grubsza rozdzielczość.
+  grid_size: 41
+  cell_km: 5.0
+
+  climatology:
+    # Okres, z którego losujemy momenty awarii (niepewność meteorologiczna).
+    # Lokalnie 10 lat — wystarczy do sensownego rozkładu, a pobranie trwa chwilę.
+    meteo_range: ["2015-01-01", "2024-12-31"]
+    n_episodes: 12
+    episode_hours: 24
+
+  # Warianty fizyczne na epizod (stabilność, depozycja, wysokość uwolnienia).
+  # Każdy wymaga przeliczenia smugi, więc jest ich mało.
+  n_param_scenarios: 3
+  # Próbki ilości uwolnienia Q. Tanie: model jest liniowy względem Q, więc Q to
+  # tylko mnożnik nakładany przy agregacji (plan 3.4, P20).
+  n_source_samples: 30
+
+sources:
+  # open_meteo = prawdziwe dane ERA5 (wymaga internetu)
+  # synthetic  = deterministyczny generator (tryb --offline, testy, CI)
+  meteo: open_meteo
+  # geonames = prawdziwa lista miast z populacją (wymaga internetu)
+  # fallback = mała, wbudowana lista miast (conf/cities_fallback.csv)
+  cities: geonames
+
+sensor_sim:
+  # Symulacja sieci czujników dla scenariusza demo (plan 3.5).
+  minutes: 180
+  # Opóźnienie między tickami w sekundach; 0 = najszybciej, >0 = „na żywo” na demo.
+  realtime_sleep_s: 0.0

@@ -1,0 +1,71 @@
+# =============================================================================
+# Lokalizacje źródeł uwolnienia (plan Część 0, P14).
+#
+# Dodanie nowej lokalizacji = nowy wpis tutaj + dopisanie site_id do run.sites
+# w pliku środowiska. ZERO zmian w kodzie — to test architektury z etapu 9.
+#
+# jurisdiction_code — klucz Row Level Security (plan 4.6): analityk widzi
+# tylko lokalizacje swojej jurysdykcji. Przypisany do ŹRÓDŁA, nie do komórki.
+#
+# source_term — ilość uwolnienia w Bq (mediana) i geometryczne odchylenie
+# standardowe (gsd). gsd = 3 oznacza, że przedział 5–95% to mediana ÷6 … ×6,
+# co odpowiada rozrzutowi szacunków w literaturze (Cs-137: 5–30 PBq).
+# =============================================================================
+sites:
+  fukushima_daiichi:
+    name: "Fukushima Daiichi"
+    country_code: JP
+    jurisdiction_code: JP-07        # prefektura Fukushima
+    lat: 37.4213
+    lon: 141.0325
+    release_height_m: [20, 50, 120]  # [min, centralna, max] — dach budynku … komin
+    source_term:
+      # Fukushima 2011: Cs-137 ~15 PBq, I-131 ~150 PBq (Katata i in. 2015, Terada i in. 2020)
+      Cs-137: {median_bq: 1.5e+16, gsd: 3.0}
+      I-131: {median_bq: 1.5e+17, gsd: 3.0}
+    # Epizod walidacyjny: prawdziwe daty awarii. Tylko dla tej lokalizacji
+    # istnieją niezależne pomiary (JAEA/Safecast), z którymi porównujemy model.
+    validation:
+      scenario_set: validation_2011
+      # 2011-03-12 06:00 UTC ≈ 15:00 JST — pierwsze duże uwolnienie (blok 1)
+      episode_start: "2011-03-12T06:00:00"
+      episode_hours: 96
+      meteo_range: ["2011-03-11", "2011-03-20"]
+
+  fukushima_daini:
+    name: "Fukushima Daini"
+    country_code: JP
+    jurisdiction_code: JP-07
+    lat: 37.3167
+    lon: 141.0250
+    release_height_m: [20, 50, 120]
+    source_term:
+      Cs-137: {median_bq: 1.5e+16, gsd: 3.0}
+      I-131: {median_bq: 1.5e+17, gsd: 3.0}
+
+  tokai:
+    name: "Tokai"
+    country_code: JP
+    jurisdiction_code: JP-08        # prefektura Ibaraki — druga jurysdykcja do pokazu RLS
+    lat: 36.4664
+    lon: 140.6064
+    release_height_m: [20, 50, 120]
+    source_term:
+      Cs-137: {median_bq: 1.5e+16, gsd: 3.0}
+      I-131: {median_bq: 1.5e+17, gsd: 3.0}
+
+  lubiatowo_kopalino:
+    name: "Lubiatowo-Kopalino"
+    country_code: PL
+    jurisdiction_code: PL-22        # województwo pomorskie (ISO 3166-2:PL)
+    # UWAGA (P21): współrzędne PRZYBLIŻONE. Test Open-Meteo zwrócił elevation 0.0,
+    # czyli punkt leży na linii brzegowej. Przed poważnymi wnioskami wziąć
+    # dokładne współrzędne terenu elektrowni z dokumentów PEJ.
+    lat: 54.795
+    lon: 17.835
+    release_height_m: [20, 50, 120]
+    source_term:
+      # HIPOTETYCZNY source term: ciężka awaria rzędu Fukushimy. To NIE jest wynik
+      # analizy bezpieczeństwa AP1000 — opisane w ograniczeniach (plan Część VIII).
+      Cs-137: {median_bq: 1.5e+16, gsd: 3.0}
+      I-131: {median_bq: 1.5e+17, gsd: 3.0}
