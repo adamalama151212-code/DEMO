@@ -9,7 +9,7 @@ oraz plan wdrożenia na Databricks (DEV → PROD przez CI/CD).
 | # | Problem w rewizji 1 | Poprawka | Sekcje |
 |---|---|---|---|
 | P1 | `withWatermark` po cichu gubi spóźnione rekordy — nie da się ich skierować do `late_rejected`, a wynik zależy od podziału na mikro-batche (niedeterministyczne testy) | spóźnienie liczone jawnie z pola `sent_at` (`lag = sent_at - event_time`), podział bezstanowym filtrem; watermark tylko do ograniczenia stanu deduplikacji | 3.5.1, 3.5.2, 3.5.3, 4.4 |
-| P2 | rolling z-score / frozen reading jako okna po wierszach — nieobsługiwane w Structured Streaming; `flatMapGroupsWithState` nie istnieje w PySpark | detekcja dryfu i zamrożenia w materialized view nad `silver_sensor_clean`; stan urządzenia w tabeli Delta aktualizowanej w `foreachBatch` (`MERGE`) | 3.5.3, 3.6, 4.4 |
+| P2 | detekcja dryfu / frozen reading jako okna po wierszach — nieobsługiwane w Structured Streaming; `flatMapGroupsWithState` nie istnieje w PySpark | detekcja dryfu i zamrożenia w materialized view nad `silver_sensor_clean`; stan urządzenia w tabeli Delta aktualizowanej w `foreachBatch` (`MERGE`) | 3.5.3, 3.6, 4.4 |
 | P3 | generator wysyła stałe tło dawki niezwiązane ze smugą → join z P5–P95 nie ma sensu | dawka w generatorze wyprowadzana z wyniku modelu dla komórki czujnika + szum + wstrzyknięte odchylenia | 3.5.3, 4.4, VIII |
 | P4 | sieć „radiacyjna”, a wszystkie anomalie dotyczą wiatru | urządzenia = stacje meteo-radiacyjne (jak część stacji EURDEP); anomalie dla obu pomiarów | 3.5.1, 3.5.2 |
 | P5 | RLS po `country_code` — wszystkie lokalizacje to `JP`, filtr niczego nie filtruje | RLS po `jurisdiction_code` (prefektura/operator) + jedna lokalizacja europejska | 1.3, 4.6 |
@@ -19,6 +19,48 @@ oraz plan wdrożenia na Databricks (DEV → PROD przez CI/CD).
 | P9 | Zerobus zapisuje do tabeli o stałym schemacie — `addNewColumns` tam nie działa | główny ingest streamingu przez Auto Loader (tu żyje schema evolution); Zerobus jako opcjonalna równoległa ścieżka | 2.2, 4.4, 4.4a |
 | P10 | guardrails text-to-SQL mylone z guardrails AI-assisted development wymaganymi w write-upie | dwie osobne sekcje w write-upie | VII |
 | P11 | brak scenariusza 20–30 min demo | dodana Część X | X |
+
+### Rejestr poprawek (rewizja 3 — cel produktu, lokalizacje, dane, poprawki techniczne)
+
+| # | Problem w rewizji 2 | Poprawka | Sekcje |
+|---|---|---|---|
+| P12 | projekt opowiadany wokół odtworzenia Fukushimy 2011, a właściwe pytanie użytkownika to „co jeśli?” | **produkt = pytanie „czy uwolnienie w lokalizacji X skazi miasto Y?”**; tryb klimatologiczny jest produktem, walidacja na Fukushimie — dowodem wiarygodności | 0, 2.2, 3.4 |
+| P13 | RAG miał „odpowiadać” na pytania o skażenie — RAG wyszukuje teksty, nie liczy smugi; LLM zmyśliłby liczby | liczby **wyłącznie** z prekalkulowanej tabeli `gold_city_exposure` (text-to-SQL); RAG tylko kontekst (progi, metodologia, ograniczenia) | 4.8 |
+| P14 | lokalizacja europejska niesprecyzowana | **Lubiatowo-Kopalino (gm. Choczewo, woj. pomorskie)** — planowana EJ, 3× AP1000; RLS: `JP-07`, `JP-08`, `PL-22` | 1.3, 3.3, 4.6 |
+| P15 | „skażone” bez definicji | progi jawne w `config/thresholds.yaml`; odpowiedź zawsze probabilistyczna (P przekroczenia progu po scenariuszach pogodowych) | 3.4a |
+| P16 | nie sprawdzono dostępności danych | sprawdzone źródła + licencje; PL bez danych walidacyjnych (nie było awarii) → PL tylko tryb klimatologiczny; EURDEP wykluczony licencyjnie | 2.4 |
+| P17 | generator: stałe tło 0.05 bez szumu (każdy czujnik poza smugą = „frozen”, `std = 0`); utrata łączności 3%/min (~40% czasu offline) | szum tła; awaria 0.2%/min | 3.5.1, 3.5.3 |
+| P18 | z-score na surowej dawce nie wykryje dryfu (szum σ=0.35 → z≈1.2) i myli przejście smugi z dryfem; reguła DQ może stłumić prawdziwy alert ×5 | dryf wykrywany na **reszcie względem modelu** (średnia 30 min z `ln(dose / (tło + mediana_modelu))`); podwyższona reszta potwierdzona przez sąsiadów w promieniu 5 km = sygnał, nie usterka | 3.5.3, 4.4a |
+| P19 | dashboard AI/BI z osadzonymi poświadczeniami pokazuje wszystkim wiersze autora — RLS „nie działa” na demo; app działa jako SP | publikacja **bez embed credentials**; Databricks App z autoryzacją on-behalf-of-user | 4.6, 4.7, 4.8 |
+| P20 | skala PROD 200×200×72h×500×3 = ~4,3 mld obliczeń — sprzeczne z „nie celuj w miliardy”; trial DEV może wygasnąć przed demo | PROD: siatka 100×100 po 2 km (±100 km), 200 epizodów × 5 wariantów fizycznych × 2 nuklidy; Q jako mnożnik (liniowość modelu); koszt DEV po trialu doliczony | 3.4, 4.2, V |
+
+---
+
+## CZĘŚĆ 0 — Cel produktu (rewizja 3)
+
+**Pytanie, na które odpowiada platforma:**
+> „Gdyby doszło do uwolnienia radionuklidów do atmosfery w elektrowni X — czy miasto Y zostanie skażone?
+> Jak bardzo, jak szybko i przy jakiej pogodzie?”
+
+Nie wiadomo, *kiedy* dojdzie do awarii, więc odpowiedź nie jest jedną mapą, tylko **rozkładem po
+setkach historycznych scenariuszy pogodowych** (tryb klimatologiczny). Przykładowa odpowiedź:
+„W 18% scenariuszy pogodowych depozycja Cs-137 w Lęborku przekracza 37 kBq/m²; mediana czasu
+dotarcia smugi 1,5 h; najgorszy kierunek wiatru: z północnego zachodu”.
+
+**Zakres:** wyłącznie **uwolnienie do atmosfery** (awaria reaktora, pożar/wybuch na składowisku
+odpadów). Skażenie wód gruntowych i powierzchniowych jest poza zakresem — inna fizyka, inne dane
+(zapisane w Części VIII).
+
+**Lokalizacje:**
+| Lokalizacja | Rola | Tryb |
+|---|---|---|
+| Fukushima Daiichi (JP-07) | walidacja modelu na prawdziwej awarii + klimatologia | validation + climatology |
+| Fukushima Daini (JP-07) / Tokai (JP-08) | test „druga lokalizacja bez zmian w kodzie”, RLS między prefekturami | climatology |
+| Lubiatowo-Kopalino (PL-22) | planowana EJ — lokalna, aktualna historia na demo | climatology (brak danych walidacyjnych) |
+
+**Podział ról w aplikacji AI (P13):** model dyspersji liczy → Gold przechowuje → LLM tłumaczy
+pytanie na SQL i wynik na język naturalny → RAG dokłada kontekst. LLM nigdy nie podaje liczby,
+której nie ma w wyniku zapytania.
 
 ---
 
@@ -39,7 +81,7 @@ idempotencja, dashboard, RAG, testy) wynika z projektu naturalnie. Trzy elementy
 | **Ingest batch** | Open-Meteo (REST), pomiary walidacyjne | ✅ naturalne |
 | **Ingest streaming** | symulator sieci monitoringu → Auto Loader (opcjonalnie równolegle Zerobus) | ⚠️ **do zaprojektowania** |
 | Unity Catalog (katalogi/schematy/volumes) | naturalne | ✅ |
-| **RLS / CLS** | wielopodmiotowość wg jurysdykcji (prefektura/operator), lokalizacje w JP i w UE | ⚠️ **wymaga uzasadnienia** |
+| **RLS / CLS** | wielopodmiotowość wg jurysdykcji (prefektura/województwo), lokalizacje w JP i w PL | ⚠️ **wymaga uzasadnienia** |
 | Secrets w Key Vault | klucze API, token modelu | ✅ naturalne |
 | Schema evolution | Auto Loader `schemaEvolutionMode = addNewColumns` na surowym JSON — firmware v2 dodaje kolumnę | ✅ naturalne (tylko ścieżka Auto Loader, nie Zerobus) |
 | Data quality / expectations | expectations w Lakeflow: zakresy fizyczne + **czyszczenie brudnych danych czujników** | ✅ **bardzo naturalne, teraz główny akcent projektu** |
@@ -49,7 +91,7 @@ idempotencja, dashboard, RAG, testy) wynika z projektu naturalnie. Trzy elementy
 | Testy jednostkowe + DQ w CI | testy fizyki (wartości analityczne!) + testy na spóźnione/anomalne dane | ✅ **mocna strona** |
 | Asset Bundles + CI/CD | GitHub Actions | ✅ |
 | Dashboard na gold | mapa ryzyka, ranking lokalizacji | ✅ |
-| Aplikacja AI (RAG) | router: text-to-SQL (Foundation Model API) + RAG dokumentowy | ✅ **mocna strona** |
+| Aplikacja AI (RAG) | „czy miasto Y zostanie skażone?” — text-to-SQL na `gold_city_exposure` + RAG dokumentowy (kontekst) | ✅ **mocna strona** |
 | ≥1 zdolność zaawansowana | **CDC** — `AUTO CDC` na rejestrze urządzeń (SCD2) + opcjonalnie Zerobus | ✅ |
 
 > **Uwaga do P8:** ingest z Open-Meteo przez REST **nie jest** liczony jako „REST API automation" —
@@ -70,10 +112,10 @@ Część IV.4a.
 **Luka 2 — RLS/CLS.** Dane o skażeniu same z siebie nie mają wrażliwych kolumn. Uzasadnienie:
 platforma jest **wielopodmiotowa** — korzystają z niej regionalne i krajowe organy dozoru.
 - **RLS:** analityk widzi tylko lokalizacje i czujniki w swojej jurysdykcji (`jurisdiction_code`,
-  np. `JP-07` Fukushima, `JP-08` Ibaraki, `EU-xx` lokalizacja europejska). Filtr po samym
+  np. `JP-07` Fukushima, `JP-08` Ibaraki, `PL-22` pomorskie). Filtr po samym
   `country_code` byłby pusty w praktyce — Daiichi i Daini to oba `JP`. Dlatego: podział
-  na prefektury/operatorów **oraz** jedna lokalizacja europejska (Open-Meteo działa globalnie,
-  kod się nie zmienia — to jednocześnie test architektury z etapu 9)
+  na prefektury/województwa **oraz** lokalizacja w Polsce — Lubiatowo-Kopalino (Open-Meteo
+  działa globalnie, kod się nie zmienia — to jednocześnie test architektury z etapu 9)
 - **CLS:** dokładne parametry źródła uwolnienia (`source_term_bq`, dokładne współrzędne reaktora)
   maskowane dla roli `public_analyst`, widoczne dla `regulator`
 - dodatkowo: surowe odczyty z sieci monitoringu zawierają `device_id` i dokładną lokalizację
@@ -111,8 +153,10 @@ Azure Databricks + ADLS Gen2 + Key Vault. (GitHub Actions jest dopuszczone jako 
 ```
 ŚCIEŻKA A — BATCH (symulacja)
 Open-Meteo REST ──┐
-Safecast / MEXT ──┼──► landing (volume) ──► bronze ──► silver ──► gold_risk_map
-sites, grid    ───┘                                              gold_validation
+Safecast / JAEA ──┤
+sites, grid    ───┼──► landing (volume) ──► bronze ──► silver ──► gold_risk_map
+miasta (GeoNames)─┤                                              gold_city_exposure  ◄── pytanie główne (P12)
+ludność (GHS-POP)─┤                                              gold_validation
 scenarios (MC) ───┘                                              gold_site_ranking
 
 ŚCIEŻKA B — STREAMING (monitoring, celowo brudne dane)
@@ -124,7 +168,7 @@ symulator czujników ──► volume landing/sensor ──► Auto Loader ─�
                                                    └── lag ≤ 15 min ──► dedup (watermark) + expectations
                                                                           ├── drop/quarantine ──► ops.sensor_quarantine
                                                                           └── silver_sensor_clean
-                                                  silver_sensor_quality (MV: dryf z-score, frozen reading)
+                                                  silver_sensor_quality (MV: dryf na reszcie vs model, frozen reading)
                                                   ──► gold_live_alerts
                                                         ▲
                                           (join z gold_risk_map: pomiar vs przedział P5–P95)
@@ -153,9 +197,31 @@ radplume_dev / radplume_prod        (katalogi — jeden na środowisko)
 
 Nazwa katalogu wstrzykiwana przez zmienną bundla — **ten sam kod w obu środowiskach**.
 
+### 2.4 Źródła danych — sprawdzona dostępność (P16)
+
+Stan na 09.2026, sprawdzone w dokumentacji źródeł. **Przed etapem 2 odpalić lokalnie po jednym
+zapytaniu do każdego API** (sandbox, w którym pisano ten plan, nie miał do nich dostępu sieciowego).
+
+| Dane | Źródło | JP | PL | Licencja | Uwagi |
+|---|---|---|---|---|---|
+| Meteo godzinowe (wiatr 10 m/100 m, opad, zachmurzenie, promieniowanie) | Open-Meteo Historical API (ERA5 0,25° od 1940, ERA5-Land 0,1° od 1950) | ✅ | ✅ | CC BY 4.0 | bez klucza API; rozdzielczość ~10–25 km — zapisać w ograniczeniach |
+| Moc dawki (walidacja) | Safecast — API + pełny eksport CSV | ✅ | — | CC0 | pomiary dopiero od ~kwietnia 2011, nie z samych dni uwolnienia |
+| Depozycja Cs-137/Cs-134 (walidacja) | JAEA EMDB — pomiary lotnicze MEXT/DOE, 2200 próbek gleby | ✅ | — | publiczne | **najlepszy zbiór walidacyjny**: mierzy depozycję, czyli to, co liczy model |
+| Czasowy przebieg uwolnienia (source term) | Katata i in. 2015 (ACP), Terada i in. 2020 (JER) — tabele godzinowe w publikacjach | ✅ | — | publikacje naukowe | Cs-137 w literaturze: 5–30 PBq → to jest zakres niepewności parametrycznej |
+| Source term dla AP1000 | hipotetyczny: skalowanie od Fukushimy + scenariusze z raportu środowiskowego PEJ (do sprawdzenia) | — | ⚠️ | — | jawnie hipotetyczny, opisać w Części VIII |
+| Miasta z populacją | GeoNames (`JP.zip`, `PL.zip`) | ✅ | ✅ | CC BY 4.0 | punkt = centroid miasta |
+| Rozkład ludności | GHS-POP (JRC/Copernicus), 100 m / 1 km | ✅ | ✅ | reuse z podaniem źródła | **Mollweide EPSG:54009** → reprojekcja do CRS siatki (ryzyko z Części IX) |
+| Sieć monitoringu na żywo | EURDEP / mapa PAA | — | ❌ | EURDEP: zakaz wykorzystania bez pisemnej zgody | **nie używać** — strumień czujników pozostaje symulowany |
+
+**Wniosek:** dane dla obu krajów są dostępne. Asymetria jest świadoma i trzeba ją opisać:
+Japonia ma dane walidacyjne (była awaria), Polska nie (i dobrze). Dla Lubiatowa model działa
+w trybie klimatologicznym, a jego wiarygodność opiera się na walidacji przeprowadzonej w Japonii
+**tym samym kodem**. Walidacja na Czarnobylu w Polsce odpada: ~600–900 km od źródła to poza
+zakresem stosowalności modelu gaussowskiego.
+
 ---
 
-## CZĘŚĆ III — Faza 0: PoC lokalny (5–6 dni)
+## CZĘŚĆ III — Faza 0: PoC lokalny (8–12 dni)
 
 Cel: zweryfikować fizykę i koszt **zanim** wyda się pieniądze na chmurę.
 Szczegóły w osobnym dokumencie; poniżej to, co krytyczne dla wersji finalnej.
@@ -184,12 +250,16 @@ radplume/
 ├── config/
 │   ├── local.yaml  dev.yaml  prod.yaml
 │   ├── physics.yaml
+│   ├── sites.yaml              # Daiichi, Daini, Tokai, Lubiatowo-Kopalino + jurisdiction_code
+│   ├── thresholds.yaml         # definicja „skażenia” (P15)
 │   └── sensor_dq.yaml
 ├── src/radplume/
 │   ├── session.py  paths.py  config.py
-│   ├── ingest/     meteo.py  measurements.py  scenarios.py  sensor_sim.py  device_registry.py
+│   ├── ingest/     meteo.py  measurements.py  scenarios.py  cities.py  population.py
+│   │               sensor_sim.py  device_registry.py
 │   ├── bronze/  silver/  gold/  validation/
 │   │   silver/     sensor_clean.py  sensor_quality.py  devices_cdc.py
+│   │   gold/       risk_map.py  city_exposure.py  site_ranking.py
 │   └── app/        router.py  text_to_sql.py  rag.py
 ├── eval/
 │   └── text_to_sql_eval.yaml   # 20–30 pytań + oczekiwany wynik na Gold
@@ -213,8 +283,9 @@ radplume/
 | 5 | **Fizyka na jednym wierszu** ⚠️ | 3 testy: oś smugi, punkt boczny, **bilans masy** |
 | 6 | Silver: pełna dyspersja | ~10 mln wierszy < 5 min; mapa smugi zgodna z kierunkiem wiatru |
 | 7 | Gold | `percentile_approx`, mapa prawdopodobieństwa czytelna |
+| 7a | **`gold_city_exposure`** (P12) | dla każdego miasta z GeoNames w promieniu 100 km: P(przekroczenia progu), P5/P50/P95 depozycji, mediana czasu dotarcia, najgorszy sektor wiatru |
 | 8 | **Walidacja** ⚠️ | znasz coverage, FAC2/FAC5, błąd kierunkowy |
-| 9 | Druga lokalizacja (Daini) | **bez zmian w kodzie** — test architektury |
+| 9 | Kolejne lokalizacje (Daini, **Lubiatowo-Kopalino**) | **bez zmian w kodzie**, tylko wpis w `sites.yaml` — test architektury |
 | 10 | Próba skalowania lokalnie | wiesz, co pęka pierwsze |
 | 11 | **Symulator czujników + czyszczenie** ⚠️ | patrz 3.5 — działa lokalnie na streamie plikowym |
 
@@ -225,11 +296,12 @@ radplume/
 
 ```yaml
 run:
-  mode: validation            # validation | climatology
+  mode: climatology           # climatology (produkt, P12) | validation (tylko Fukushima 2011)
   episode_hours: 72           # długość jednego uwolnienia
-  n_episodes: 1               # ile losowych momentów startu (climatology: 50-200)
-  meteo_range: [2011-03-11, 2011-03-16]
-  n_param_scenarios: 30       # niepewność parametrów na epizod
+  n_episodes: 200             # losowe momenty startu (validation: 1)
+  meteo_range: [2005-01-01, 2024-12-31]   # validation: [2011-03-11, 2011-03-16]
+  n_param_scenarios: 5        # warianty fizyczne na epizod (stabilność, depozycja) — wymagają przeliczenia smugi
+  n_source_samples: 200       # niepewność ilości uwolnienia Q — mnożnik skalarny, bez przeliczania (P20)
   grid_size: 60
   cell_km: 4
 ```
@@ -240,6 +312,32 @@ run:
 Iloczyn tych wymiarów to przestrzeń Monte Carlo. **Uwaga na eksplozję:** przy trybie
 klimatologicznym nie utrwalaj Silvera godzinowego — agreguj do poziomu epizodu w tym samym jobie.
 Godzinowy Silver tylko dla epizodu walidacyjnego.
+
+**Trik obliczeniowy (P20):** stężenie i depozycja w modelu gaussowskim są **liniowe względem
+ilości uwolnienia Q**. Smugę liczy się raz dla jednostkowego uwolnienia (1 Bq) na parę
+(epizod pogodowy, wariant fizyczny), a niepewność Q (×10 w literaturze) nakłada się dopiero
+przy agregacji jako mnożnik. Dzięki temu 200 próbek Q nie mnoży kosztu obliczeń.
+
+### 3.4a Definicja „skażenia” (P15)
+
+Odpowiedź nigdy nie brzmi „tak/nie”, tylko „w N% scenariuszy pogodowych przekroczono próg T”.
+Progi są jawne, w configu, z podanym źródłem — i trafiają do korpusu RAG, żeby aplikacja
+umiała je wyjaśnić:
+
+```yaml
+thresholds:
+  cs137_deposition_kbq_m2:
+    contaminated: 37        # definicja „terenu skażonego” po Czarnobylu (IAEA)
+    strict_control: 555     # strefa ścisłej kontroli po Czarnobylu
+  annual_dose_msv:
+    public_limit: 1         # dawka graniczna dla ludności
+    evacuation: 20          # próg ewakuacji stosowany po Fukushimie
+```
+
+`gold_city_exposure` — klucz `(site_id, city_id, nuclide, threshold_id)`, kolumny:
+`distance_km`, `bearing_deg`, `population`, `p_exceed`, `dep_p05`, `dep_p50`, `dep_p95`,
+`arrival_h_p50`, `worst_wind_sector`, `n_scenarios`, `model_version`. Miasta w promieniu
+**100 km** od źródła — dalej model gaussowski traci sens (Część VIII).
 
 ### 3.5 Symulator brudnych danych — założenia i lokalne testowanie ⭐ NOWE
 
@@ -256,8 +354,9 @@ buforuje, a po przywróceniu łączności wysyła całą zaległą paczkę na ra
 znacznikami czasu.
 
 Parametry symulacji:
-- prawdopodobieństwo utraty łączności: ok. 2–5% szans na start awarii w każdym "tick-u" na
-  urządzenie (np. co 1 min symulacji)
+- prawdopodobieństwo utraty łączności: ok. 0.2% szans na start awarii w każdym "tick-u" na
+  urządzenie (co 1 min symulacji) — średnio jedna awaria na ~8 h. (Rewizja 2 miała 2–5%/min,
+  co przy średniej awarii 25 min dawało ~40% czasu offline — P17)
 - czas trwania awarii: losowy, np. `uniform(5, 45)` minut
 - po powrocie: urządzenie wysyła wszystkie zbuforowane odczyty jednym batchem, z oryginalnymi
   (przeszłymi) `event_time`, ale jednym **`sent_at`** = moment wysyłki (pole w payloadzie,
@@ -297,8 +396,8 @@ Parametry symulacji:
      przekraczająca zakres detektora → twardy błąd czujnika → `expect_or_drop`
      (rekord zapisany w `ops.sensor_quarantine` z powodem, żeby był widoczny na dashboardzie)
   2. **dryf sensora dawki** — stopniowe, powolne przesunięcie odczytu w górę przez np. 2h
-     (typowe dla rozkalibrowanego detektora) → wykrywane przez rolling z-score, nie przez
-     twardy próg → trafia do kwarantanny, nie do drop
+     (typowe dla rozkalibrowanego detektora) → wykrywane na reszcie względem modelu, nie przez
+     twardy próg (P18) → trafia do kwarantanny, nie do drop
   3. **zamrożony odczyt** — czujnik zwraca dokładnie tę samą wartość przez N minut z rzędu
      (typowy objaw zawieszonego firmware) → flaga (`expect`), nie drop, bo teoretycznie
      mogłaby to być realna cisza
@@ -326,9 +425,11 @@ sensor_dq:
     hard_min: 0
     hard_max: 1000                # zakres detektora; kontekstowo dobrać wg skali projektu
 
-  drift_detection:               # liczone w MV silver_sensor_quality, nie w strumieniu
-    window_minutes: 120
-    z_score_threshold: 3.0
+  drift_detection:               # liczone w MV silver_sensor_quality, nie w strumieniu (P18)
+    # reszta r = ln(dose / (tło + mediana_modelu)); bez dryfu E[r] ≈ 0, σ ≈ 0.35
+    window_minutes: 30
+    residual_mean_threshold: 0.2 # średnia r z 30 min; błąd std. średniej ≈ 0.35/√30 ≈ 0.064 → ~3σ
+    neighbor_radius_km: 5        # podwyższona reszta u sąsiadów = realny sygnał, nie dryf
     warmup_minutes: 10           # nowe urządzenie bez baseline'u nie podlega regule
 
   frozen_reading:
@@ -364,6 +465,8 @@ from datetime import datetime, timedelta
 
 OUT_DIR = Path("data/raw/sensor_stream")
 BACKGROUND_USV_H = 0.05
+BACKGROUND_SIGMA = 0.15        # szum tła — bez niego czujnik poza smugą = stała wartość (P17)
+OUTAGE_P_PER_MIN = 0.002       # ~1 awaria łączności na 8 h (P17)
 
 class DeviceState:
     def __init__(self, device_id, cell_id, firmware="v1"):
@@ -374,13 +477,13 @@ class DeviceState:
         self.drift_left, self.drift_offset = 0, 0.0      # (2) dryf detektora dawki
         self.frozen_left, self.frozen_value = 0, None    # (3) zamrożony odczyt
 
-    def tick(self, sim_time, rng, expected_dose):
+    def tick(self, sim_time, rng, expected_dose, expected_wind):
         # 1. Losowa utrata łączności
-        if self.connected and rng.random() < 0.03:
+        if self.connected and rng.random() < OUTAGE_P_PER_MIN:
             self.connected = False
             self.outage_left = int(rng.uniform(5, 45))
 
-        reading = self._make_reading(sim_time, rng, expected_dose)
+        reading = self._make_reading(sim_time, rng, expected_dose, expected_wind)
 
         if not self.connected:
             self.buffer.append(reading)
@@ -398,10 +501,14 @@ class DeviceState:
             r["sent_at"] = sim_time.isoformat()
         return flushed
 
-    def _make_reading(self, sim_time, rng, expected_dose):
+    def _make_reading(self, sim_time, rng, expected_dose, expected_wind):
         median = expected_dose.get((self.cell_id, sim_time.replace(minute=0)), 0.0)
-        dose = BACKGROUND_USV_H + median * rng.lognormvariate(0, 0.35)
-        wind = max(rng.gauss(8, 3), 0)
+        dose = (BACKGROUND_USV_H * rng.lognormvariate(0, BACKGROUND_SIGMA)
+                + median * rng.lognormvariate(0, 0.35))
+        # wiatr z silver_meteo dla komórki i godziny + szum lokalny, nie losowy gauss(8, 3):
+        # inaczej walidacja krzyżowa między czujnikami (3.6) nie miałaby sensu
+        wind = max(expected_wind.get((self.cell_id, sim_time.replace(minute=0)), 5.0)
+                   + rng.gauss(0, 1.0), 0)
 
         roll = rng.random()
         if roll < 0.004:
@@ -434,13 +541,14 @@ class DeviceState:
             reading["detector_temp_c"] = round(rng.gauss(18, 4), 1)  # nowa kolumna -> schema evolution
         return reading
 
-def run_simulation(devices, expected_dose, minutes=180, seed=42, start=datetime(2011, 3, 14)):
+def run_simulation(devices, expected_dose, expected_wind, minutes=180, seed=42,
+                   start=datetime(2011, 3, 14)):
     rng = random.Random(seed)                          # seed -> identyczny wynik, testowalne
     sim_time = start
     for _ in range(minutes):
         batch = []
         for d in devices:
-            batch.extend(d.tick(sim_time, rng, expected_dose))
+            batch.extend(d.tick(sim_time, rng, expected_dose, expected_wind))
         if batch:
             fname = OUT_DIR / f"batch_{sim_time.strftime('%Y%m%dT%H%M%S')}.json"
             fname.write_text("\n".join(json.dumps(r) for r in batch))
@@ -449,7 +557,8 @@ def run_simulation(devices, expected_dose, minutes=180, seed=42, start=datetime(
 ```
 
 Ten generator jest **odseparowany od logiki czyszczenia** — dokładnie zgodnie z zasadą
-przenaszalności z sekcji 3.1. `expected_dose` to słownik wczytany z eksportu `gold_risk_map`
+przenaszalności z sekcji 3.1. `expected_dose` to słownik wczytany z eksportu `gold_risk_map`,
+a `expected_wind` — z eksportu `silver_meteo` (ta sama komórka × godzina)
 (plik w volume), a lista urządzeń (z `cell_id`, `jurisdiction_code`, `firmware`) pochodzi
 z rejestru urządzeń — tego samego, który zasila ścieżkę CDC (4.4). Na Databricks generator
 działa jako task Joba zapisujący pliki do volume `landing/sensor`.
@@ -512,25 +621,42 @@ reguły twarde trafiają do `ops.sensor_quarantine` osobnym flowem z odwróconym
 
 **Krok 3b — reguły wymagające historii urządzenia (`silver/sensor_quality.py`) (poprawka P2)**
 
-Rolling z-score, zamrożony odczyt i `max_delta_per_reading` potrzebują poprzednich odczytów
+Dryf, zamrożony odczyt i `max_delta_per_reading` potrzebują poprzednich odczytów
 tego samego urządzenia. Funkcje okna po wierszach (`lag`, `rows between`) **nie są obsługiwane**
 w Structured Streaming, więc te reguły liczone są w **materialized view**
-`silver_sensor_quality` nad `silver_sensor_clean` (przeliczanym przyrostowo przez Lakeflow):
+`silver_sensor_quality` nad `silver_sensor_clean`. (MV z funkcjami okna najpewniej nie odświeży
+się przyrostowo, tylko przeliczy w całości — przy skali demo to akceptowalne.)
+
+**Dlaczego nie z-score na surowej dawce (P18):** szum odczytu ma σ ≈ 0.35 (35%), a dawka
+zmienia się co godzinę razem ze smugą. Z-score z ruchomego okna 120 min przy dryfie +1%/min
+wychodzi ≈ 1.2 — próg 3.0 nie zostałby przekroczony, a prawdziwe przejście smugi dawałoby
+fałszywe alarmy. Dlatego dryf liczony jest na **reszcie względem modelu**
+`r = ln(dose / (tło + mediana_modelu))`, która bez dryfu ma średnią ≈ 0 niezależnie od smugi:
 
 ```python
 w = Window.partitionBy("device_id").orderBy("event_time")
-w_roll = (Window.partitionBy("device_id")
-          .orderBy(F.col("event_time").cast("long"))
-          .rangeBetween(-120 * 60, -1))     # 120 min wstecz, bez bieżącego odczytu
+w_30 = (Window.partitionBy("device_id")
+        .orderBy(F.col("event_time").cast("long"))
+        .rangeBetween(-30 * 60, 0))          # ostatnie 30 min
 
-quality = (clean
-    .withColumn("roll_mean", F.avg("dose_rate_usv_h").over(w_roll))
-    .withColumn("roll_std",  F.stddev("dose_rate_usv_h").over(w_roll))
-    .withColumn("z_score", (F.col("dose_rate_usv_h") - F.col("roll_mean")) / F.col("roll_std"))
+quality = (clean_with_model                  # silver_sensor_clean ⋈ eksport mediany modelu
+    .withColumn("residual", F.log(F.col("dose_rate_usv_h") /
+                                  (F.lit(BACKGROUND) + F.col("model_median"))))
+    .withColumn("residual_30m", F.avg("residual").over(w_30))
     .withColumn("same_as_prev", F.col("dose_rate_usv_h") == F.lag("dose_rate_usv_h").over(w))
     # długość serii identycznych wartości -> frozen_reading
     ...)
+
+# sąsiedzi: mediana residual_30m innych urządzeń w promieniu 5 km w tym samym oknie
+# drift_suspect  = residual_30m > 0.2  AND  mediana sąsiadów ≤ 0.2   (tylko ten czujnik)
+# plume_signal   = residual_30m > 0.2  AND  mediana sąsiadów > 0.2   (wszyscy w okolicy)
 ```
+
+**Konflikt DQ vs sygnał (P18):** wstrzyknięte na demo odchylenie ×5 to skok, który naiwna
+reguła DQ oznaczyłaby jako usterkę — i sama by stłumiła najważniejszy alert. Rozstrzygnięcie:
+usterka czujnika jest **lokalna**, realne odchylenie od modelu dotyczy **obszaru**. Dlatego
+scenariusz demo wstrzykuje odchylenie wszystkim urządzeniom w komórce, a reguła dryfu wymaga,
+żeby sąsiedzi go nie potwierdzali.
 
 Wynik: kolumna `quality_status ∈ {clean, drift_suspect, frozen, warmup}` — dryf trafia do
 kwarantanny (nie jest usuwany), frozen jest tylko flagą. Na demo i do alertów to wystarcza —
@@ -545,7 +671,9 @@ wywołują czyste funkcje na statycznych DataFrame'ach i nie zależą od podzia�
 - odczyt z `lag = 20 min` → **trafia do `sensor_late_rejected`**
 - ten sam `(device_id, event_time)` dwa razy → **jeden rekord w silver**
 - wiatr 80 m/s / dawka poza zakresem → **odrzucone, obecne w `sensor_quarantine` z powodem**
-- powolny dryf +1%/min przez 2h → **`drift_suspect` (z-score), kwarantanna, nie drop**
+- powolny dryf +1%/min przez 2h na jednym urządzeniu → **`drift_suspect` (reszta vs model), kwarantanna, nie drop**
+- odchylenie ×5 na wszystkich urządzeniach komórki → **`clean` + alert `outside_model_band`, nie `drift_suspect`** (P18)
+- czujnik poza smugą (mediana modelu = 0) przez 30 min → **nie jest `frozen`** (szum tła, P17)
 - ta sama wartość 12 razy z rzędu → **oflagowana jako `frozen`**
 - pierwsze 10 min nowego urządzenia → **`warmup`, bez reguły dryfu**
 
@@ -588,7 +716,7 @@ warto wybrać 2–3, które dają najwięcej różnorodności bez rozdmuchania z
 **Metadane i cykl życia urządzenia**
 - **Nowe urządzenie bez historii** — pierwsze ~10 min danych z nowego `device_id` nie ma
   jeszcze baseline'u do wykrywania dryfu → osobna ścieżka "warm-up", nieobjęta regułami
-  dryfu/z-score dopóki baseline nie powstanie
+  dryfu dopóki baseline nie powstanie
 - **Firmware version drift** — część floty ma symulowany starszy firmware z inną precyzją
   albo inną jednostką → schema evolution + reguła DQ uzależniona od `firmware_version`
 
@@ -641,14 +769,15 @@ Nikt nie klika `ALTER TABLE ... SET ROW FILTER` w SQL editorze na PROD.
 targets:
   dev:
     mode: development
-    variables: {catalog: radplume_dev, grid_size: 60, n_param_scenarios: 30}
+    variables: {catalog: radplume_dev, grid_size: 50, cell_km: 4, n_episodes: 20, n_param_scenarios: 3}
   prod:
     mode: production
-    variables: {catalog: radplume_prod, grid_size: 200, n_param_scenarios: 500}
+    variables: {catalog: radplume_prod, grid_size: 100, cell_km: 2, n_episodes: 200, n_param_scenarios: 5}
     permissions: [...]
 ```
 
-Ta sama różnica DEV/PROD co lokalnie: **tylko zmienne**.
+Ta sama różnica DEV/PROD co lokalnie: **tylko zmienne**. Obie siatki pokrywają ±100 km od
+źródła — PROD różni się rozdzielczością i liczbą scenariuszy, nie zasięgiem.
 
 ### 4.3 Pipeline deklaratywny (Lakeflow) — ścieżka batch
 
@@ -756,11 +885,17 @@ Idempotencja:
 
 ### 4.6 Governance
 
-- **RLS (poprawka P5):** `ROW FILTER` na `gold_risk_map`, `gold_live_alerts` i
-  `silver_sensor_clean` po `jurisdiction_code` vs grupa użytkownika
-  (`is_account_group_member('jur_JP-07')` itd.; `regulator_national` widzi wszystko).
-  Lokalizacja europejska sprawia, że filtr jest widoczny na demo: ten sam dashboard,
-  dwóch użytkowników, różne wiersze
+- **RLS (poprawka P5, P14):** `ROW FILTER` na `gold_risk_map`, `gold_city_exposure`,
+  `gold_live_alerts` i `silver_sensor_clean` po `jurisdiction_code` vs grupa użytkownika
+  (`is_account_group_member('jur_JP-07')`, `jur_PL-22` itd.; `regulator_national` widzi wszystko).
+  Jurysdykcja przypisana jest do **lokalizacji źródła** (`site_id`), nie do komórki siatki —
+  smuga z Daiichi obejmuje kilka prefektur, ale odpowiada za nią organ właściwy dla elektrowni.
+  Lokalizacja w Polsce sprawia, że filtr jest widoczny na demo: ten sam dashboard,
+  dwóch użytkowników (JP i PL), różne wiersze
+- **RLS a dashboard i aplikacja (P19):** dashboard AI/BI publikowany **bez osadzonych
+  poświadczeń** (inaczej każdy widz dostaje uprawnienia publikującego i RLS znika);
+  Databricks App z autoryzacją **on-behalf-of-user**, żeby zapytania szły z tożsamością
+  pytającego, a nie service principala aplikacji
 - **CLS:** `COLUMN MASK` na `source_term_bq` i na `device_id` / dokładnych współrzędnych czujników
   (dla `public_analyst`: hash `device_id`, współrzędne zaokrąglone do komórki siatki)
 - role: `regulator` (pełny dostęp), `public_analyst` (maskowany), `service_principal_ci`
@@ -772,6 +907,9 @@ Idempotencja:
 
 Pytania, na które odpowiada:
 1. Mapa prawdopodobieństwa przekroczenia progu — wybór lokalizacji, nuklidu, okna czasowego
+1a. **Narażenie miast** (`gold_city_exposure`) — tabela/mapa miast w promieniu 100 km:
+    P(przekroczenia progu), czas dotarcia, najgorszy kierunek wiatru — to samo pytanie, które
+    zadaje się aplikacji AI
 2. Ranking lokalizacji wg oczekiwanej liczby narażonych mieszkańców
 3. Róża ryzyka — sektor × miesiąc
 4. **Jakość modelu:** coverage, FAC2/FAC5, rozbicie błędu wg opadu
@@ -783,20 +921,36 @@ Punkt 4 jest nietypowy i warty podkreślenia: dashboard raportuje **ograniczenia
 
 ### 4.8 Aplikacja AI
 
+**Pytanie główne (P12, P13):** „czy uwolnienie w Lubiatowie skazi Lębork?”, „które miasta
+w promieniu 50 km od Fukushima Daiichi mają ponad 10% szans na przekroczenie 37 kBq/m²?”,
+„przy jakim wietrze Gdańsk jest zagrożony?”.
+
+**Zasada nadrzędna:** każda liczba w odpowiedzi pochodzi z wyniku zapytania SQL do Golda.
+LLM tłumaczy pytanie na SQL i wynik na język naturalny — **nigdy nie szacuje sam**. Jeśli
+miasta lub lokalizacji nie ma w `gold_city_exposure`, aplikacja mówi to wprost („ta lokalizacja
+nie była modelowana”), zamiast zgadywać.
+
 **Router** klasyfikuje intencję:
-- **liczby** → text-to-SQL na tabelach Gold — model z **Foundation Model API** (pay-per-token)
-  z promptem zawierającym schemat Gold i przykładowe zapytania (poprawka P7)
+- **liczby / „czy X skazi Y”** → text-to-SQL na `gold_city_exposure`, `gold_risk_map`,
+  `gold_site_ranking`, `gold_validation` — model z **Foundation Model API** (pay-per-token)
+  z promptem zawierającym schemat Gold i przykładowe zapytania (poprawka P7). Nazwy miast
+  rozwiązywane przez tabelę aliasów (`Lebork` / `Lębork`, `Fukushima City` / `福島市`)
 - **metodologia / fakty** → RAG wektorowy (Vector Search) na dokumentach: IAEA, UNSCEAR, ICRP,
-  opisy modelu gaussowskiego i klas Pasquilla, **własna dokumentacja projektu i wyniki walidacji**
-- **mieszane** → oba konteksty
+  opisy modelu gaussowskiego i klas Pasquilla, **definicje progów z `thresholds.yaml`**,
+  **własna dokumentacja projektu, wyniki walidacji i sekcja ograniczeń (Część VIII)**
+- **mieszane** („czy Lębork zostanie skażony i co to znaczy dla mieszkańców?”) → liczba
+  z SQL + interpretacja progu z RAG; każda odpowiedź o skażeniu kończy się jednym zdaniem
+  o ograniczeniach modelu (to narzędzie porównawcze, nie prognoza kryzysowa)
 
 **Zabezpieczenia text-to-SQL (do opisania w write-upie jako guardrails):**
 - whitelista tabel i kolumn wymuszana przez parser (sqlglot), nie przez prompt
 - tylko `SELECT`, wymuszony `LIMIT`, timeout
 - walidacja składni przed wykonaniem + jedna pętla retry z komunikatem błędu
 - wygenerowany SQL pokazywany użytkownikowi
-- zapytania wykonywane z tożsamością użytkownika (lub SP z uprawnieniami `public_analyst`),
+- zapytania wykonywane z tożsamością użytkownika (on-behalf-of-user, P19),
   więc RLS/CLS obowiązuje także w aplikacji AI
+- odpowiedź z liczbą, której nie ma w wyniku zapytania, jest odrzucana (walidacja po stronie
+  aplikacji: liczby w tekście ⊆ liczby w wyniku SQL)
 
 **Hosting modelu (poprawka P7):** Foundation Model API w trybie pay-per-token — brak
 utrzymywanego endpointu GPU, koszt rzędu kilku dolarów za cały projekt, zero ryzyka
@@ -804,7 +958,8 @@ utrzymywanego endpointu GPU, koszt rzędu kilku dolarów za cały projekt, zero 
 backend części liczbowej. Decyzja kosztowa do write-upu.
 
 **Do README:** własny zestaw ewaluacyjny `eval/text_to_sql_eval.yaml` (20–30 pytań do Golda
-z oczekiwanym wynikiem) i odsetek poprawnych odpowiedzi (execution accuracy) — tani, mierzalny
+z oczekiwanym wynikiem, w tym ≥ 10 pytań typu „czy X skazi Y” po polsku i angielsku oraz
+≥ 3 pytania o niemodelowane lokalizacje, na które poprawna odpowiedź to odmowa) i odsetek poprawnych odpowiedzi (execution accuracy) — tani, mierzalny
 i dotyczy Twoich tabel, a nie ogólnego benchmarku.
 
 **Opcjonalnie, tylko jeśli zostanie czas (blok 10):** dostrojony Qwen serwowany jako
@@ -830,7 +985,7 @@ Uwierzytelnienie: OIDC do Azure, service principal, zero sekretów w repo.
 | Pozycja | Szacunek |
 |---|---|
 | PoC lokalny | 0 |
-| DEV (trial $400, 14 dni) | 0, jeśli zmieścisz się w oknie |
+| DEV (trial $400, 14 dni) | 0 w oknie triala — **ale** DEV musi działać także na Demo Day (deploy DEV → PROD na żywo); po trialu workspace przechodzi na płatny Premium: doliczyć ~10–30 $ za okres po trialu (P20) |
 | PROD — przebiegi wsadowe | 10–40 $ |
 | PROD — klaster streamingowy | **największe ryzyko** — 20–60 $/tydz. jeśli chodzi ciągle |
 | Storage ADLS (100–300 GB) | 3–8 $/mies. |
@@ -844,14 +999,17 @@ Uwierzytelnienie: OIDC do Azure, service principal, zero sekretów w repo.
 1. Klaster streamingowy **tylko na czas demo i testów**; `Trigger.AvailableNow` zamiast ciągłego
    `processingTime` w codziennej pracy
 2. Auto-termination 10 min wszędzie; jobs compute zamiast all-purpose do pipeline'ów
-3. DEV pracuje na `grid_size: 60` — pełna skala tylko w PROD i tylko wtedy, gdy kod działa
+3. DEV pracuje na `grid_size: 50`, 20 epizodach — pełna skala tylko w PROD i tylko wtedy, gdy kod działa
 4. Jeden pełny przebieg PROD, nie dziesięć; zrzuty ekranu Spark UI robione za pierwszym razem
 5. Pay-per-token zamiast własnego endpointu; Vector Search i ewentualny endpoint modelu
    wyłączane/skalowane do zera poza demo
 
-**Sanity check skali:** nie celuj w miliardy wierszy. `grid 200×200 × 72h × 500 scenariuszy ×
-3 nuklidy` z agregacją epizodową to kilkaset milionów wierszy — w zupełności wystarczy,
-by uzasadnić Sparka i pokazać partycjonowanie. Kilka miliardów nie doda punktów, doda rachunek.
+**Sanity check skali (P20):** rewizja 2 zakładała `200×200 × 72h × 500 × 3` ≈ 4,3 mld obliczeń —
+agregacja epizodowa zmniejsza to, co się **zapisuje**, ale nie to, co się **liczy**. Teraz:
+`100×100 komórek × 72h × 200 epizodów × 5 wariantów × 2 nuklidy` ≈ 1,4 mld prostych obliczeń
+w jednym przebiegu (Q jako mnożnik nic nie dokłada), zapisywane są tylko agregaty. Wystarczy,
+by uzasadnić Sparka i pokazać partycjonowanie. **Koszt przebiegu zmierzyć na DEV i ekstrapolować
+liniowo przed pierwszym uruchomieniem PROD** — szacunek 10–40 $ traktować jako niezweryfikowany.
 
 ---
 
@@ -859,7 +1017,7 @@ by uzasadnić Sparka i pokazać partycjonowanie. Kilka miliardów nie doda punkt
 
 | Blok | Zakres | Czas |
 |---|---|---|
-| 0 | PoC lokalny (etapy 1–11, w tym symulator brudnych danych) | 6–7 dni |
+| 0 | PoC lokalny (etapy 1–11, w tym `gold_city_exposure` i symulator brudnych danych) | 8–12 dni (rewizja 2: 6–7 — zbyt optymistycznie) |
 | 1 | Infra Azure + UC + Key Vault + szkielet bundla | 1 dzień |
 | 2 | Migracja batch: pipeline deklaratywny + expectations | 1–2 dni |
 | 3 | CI/CD: testy w GitHub Actions, deploy do DEV | 1 dzień |
@@ -867,13 +1025,13 @@ by uzasadnić Sparka i pokazać partycjonowanie. Kilka miliardów nie doda punkt
 | 4b | Ścieżka CDC: rejestr urządzeń + `AUTO CDC` SCD2 | 0.5 dnia |
 | 5 | Governance: `sql/governance.sql` jako task Joba, RLS/CLS, role, lineage | 0.5–1 dnia |
 | 6 | Dashboard (w tym metryki jakości danych) | 1 dzień |
-| 7 | Aplikacja AI: router, text-to-SQL (Foundation Model API), Vector Search, zestaw ewaluacyjny | 2 dni |
+| 7 | Aplikacja AI: router, text-to-SQL na `gold_city_exposure` (Foundation Model API), Vector Search, zestaw ewaluacyjny | 2 dni |
 | 8 | Deploy do PROD, pełny przebieg, strojenie | 1 dzień |
 | 9 | README, diagram architektury, write-up, próba demo (Część X) | 1–2 dni |
 | 10 | *Opcjonalnie:* dostrojony Qwen + benchmark Spider | tylko nadwyżka czasu |
 
 **Ścieżka krytyczna:** blok 0 → 2 → 3. Jeśli czasu zabraknie, tnij najpierw blok 10, potem
-skalę (mniejsza siatka, mniej scenariuszy, jedna lokalizacja JP + jedna UE) — **nie** komponenty
+skalę (mniejsza siatka, mniej scenariuszy, Fukushima Daiichi + Lubiatowo-Kopalino) — **nie** komponenty
 wymagane przez specyfikację. Bloku 4b nie tnij: to on gwarantuje „advanced capability”.
 **Symulatora brudnych danych (3.5) nie tnij** — to teraz najsilniejszy element projektu pod
 kątem oceny inżynierskiej.
@@ -893,7 +1051,8 @@ nie rozbudowuj fizyki kosztem bloków 4–7.
 - [ ] Bronze niezmienny — Silver i Gold odtwarzalne od zera
 
 **Governance & security**
-- [ ] RLS po `jurisdiction_code` (widoczny efekt: JP vs UE), CLS na `source_term_bq` i `device_id`
+- [ ] RLS po `jurisdiction_code` (widoczny efekt: JP vs PL), CLS na `source_term_bq` i `device_id`
+- [ ] dashboard bez osadzonych poświadczeń, aplikacja on-behalf-of-user (P19)
 - [ ] RLS/CLS i granty wdrażane z `sql/governance.sql` przez Job — nie ręcznie
 - [ ] secret scope backed by Key Vault, zero sekretów w repo
 - [ ] CI działa jako service principal z minimalnymi uprawnieniami
@@ -902,7 +1061,7 @@ nie rozbudowuj fizyki kosztem bloków 4–7.
 **Engineering quality**
 - [ ] testy fizyki z wartościami analitycznymi + bilans masy
 - [ ] testy schematów, testy idempotencji
-- [ ] **testy DQ czujników: lag 10/20 min, duplikat, spike, dryf, frozen, warm-up**
+- [ ] **testy DQ czujników: lag 10/20 min, duplikat, spike, dryf, frozen, warm-up, odchylenie obszarowe ≠ dryf**
 - [ ] test generatora: seed → identyczny wynik, dawka zgodna z pasmem modelu
 - [ ] logika w modułach, notebooki tylko jako cienka warstwa wywołań
 - [ ] czysta historia gita, konwencjonalne commity, PR-y
@@ -917,7 +1076,8 @@ nie rozbudowuj fizyki kosztem bloków 4–7.
 
 **AI & analytics**
 - [ ] dashboard odpowiada na 5 pytań z sekcji 4.7, w tym metryki jakości danych
-- [ ] aplikacja AI działa na żywo, pokazuje wygenerowany SQL i cytuje źródła, respektuje RLS
+- [ ] aplikacja AI odpowiada na „czy X skazi Y” liczbami z `gold_city_exposure`, pokazuje SQL, cytuje źródła, respektuje RLS
+- [ ] aplikacja odmawia odpowiedzi dla niemodelowanej lokalizacji zamiast zgadywać
 - [ ] wynik zestawu ewaluacyjnego text-to-SQL w README
 
 **Communication**
@@ -942,6 +1102,15 @@ nie rozbudowuj fizyki kosztem bloków 4–7.
 - **niepewność źródła rzędu ×10** — szacunki w literaturze różnią się kilkukrotnie
 - Safecast mierzy **moc dawki, nie depozycję** — konwersja wnosi dodatkowy błąd
 - brak chemii atmosferycznej i przemian form chemicznych jodu
+- **zasięg ~100 km** — krzywe Pasquilla–Gifforda są kalibrowane na kilka–kilkadziesiąt km;
+  dalej model traci sens, dlatego `gold_city_exposure` obejmuje tylko miasta w promieniu 100 km
+  (Trójmiasto od Lubiatowa to już skraj tego zakresu — zaznaczyć w odpowiedziach)
+- meteo z reanalizy ERA5 (0,25°, ~25 km) — lokalna bryza morska i rzeźba terenu są wygładzone
+- **tylko uwolnienie do atmosfery** — skażenie wód gruntowych i powierzchniowych (np. wyciek
+  z magazynu odpadów do gruntu) to inna fizyka i poza zakresem projektu
+- **Lubiatowo-Kopalino nie ma danych walidacyjnych** (nie było tam awarii) — wiarygodność
+  modelu dla Polski opiera się na walidacji tego samego kodu w Japonii; source term dla AP1000
+  jest **hipotetyczny** (skalowany od Fukushimy), a nie wynik analizy bezpieczeństwa reaktora
 - dane ze ścieżki streamingowej, w tym awarie łączności i anomalie czujników, są **symulowane**
   na podstawie realistycznych wzorców, nie są to dane z prawdziwej sieci monitoringu
 - **dawka w symulatorze jest wyprowadzona z samego modelu** (P3) — porównanie „pomiar na żywo
@@ -966,6 +1135,8 @@ kryzysowych ani produktem regulacyjnym.
 | Trial DEV wygasa w trakcie | trial dopiero po ukończeniu PoC lokalnego |
 | Eksplozja objętości w trybie klimatologicznym | brak utrwalania Silvera godzinowego, grubsza siatka |
 | Zerobus/Lakeflow API zmienione od czasu materiałów kursu | zweryfikować w aktualnej dokumentacji przed implementacją |
+| Użytkownik odczyta wynik dla Lubiatowa jako prognozę realnego zagrożenia | odpowiedź zawsze probabilistyczna, z progiem i zdaniem o ograniczeniach; hipotetyczny source term nazwany wprost |
+| API źródeł danych niedostępne / zmienione | eksport raz pobranych danych do volume `landing` (bronze niezmienny); Safecast ma pełny eksport CSV jako alternatywę dla API |
 | Symulator brudnych danych za bardzo losowy — trudno pokazać deterministyczny przypadek na demo | seedowany RNG w generatorze; przygotowany osobny "scenariusz demo" z ręcznie wywołaną awarią i anomalią w konkretnym momencie |
 | Zerobus niedostępny w regionie Azure / w preview | ścieżka główna to Auto Loader; zdolność zaawansowana zapewniona przez CDC — Zerobus tylko bonus |
 | „REST API automation” niezaliczone, bo to ingest danych, a nie automatyzacja Databricksa | nie opierać na tym wymogu; CDC jako zdolność zaawansowana; ewentualnie dopytać prowadzącego |
@@ -986,10 +1157,11 @@ przebiegu pipeline'u z jakością danych, dashboardu i aplikacji AI. Pełna skal
 | 0–4 | Architektura | diagram (batch + streaming + CDC), UC: katalogi DEV/PROD, lineage | diagram, zakładka lineage |
 | 4–9 | CI/CD na żywo | merge małego PR (np. zmiana progu w `sensor_dq.yaml`) → GitHub Actions: lint, testy, `bundle validate`, deploy DEV → deploy PROD | PR otwarty, CI zielone na DEV; w tle zdjęcie poprzedniego przebiegu na wypadek awarii |
 | 9–16 | Pipeline + DQ | `job_sensor_demo` z `run_demo_scenario()`: paczka po 20 min awarii → `sensor_late_rejected`, spike → `sensor_quarantine`, dryf → `drift_suspect`, firmware v2 → nowa kolumna (schema evolution), zmiana w rejestrze → SCD2 w `silver_devices`; widok expectations w UI pipeline'u | seed i momenty anomalii ustalone; pipeline rozgrzany |
-| 16–21 | Dashboard | mapa ryzyka, ranking, jakość modelu (FAC2/FAC5), metryki DQ, alert `outside_model_band` vs `sensor_fault`; **RLS**: ten sam dashboard jako użytkownik JP i UE | dwa konta testowe w różnych grupach |
-| 21–26 | Aplikacja AI | 1 pytanie liczbowe (widoczny SQL), 1 metodologiczne (cytaty ze źródeł), 1 mieszane | lista pytań sprawdzonych na zestawie ewaluacyjnym + pytania zapasowe |
+| 16–21 | Dashboard | mapa ryzyka, ranking, jakość modelu (FAC2/FAC5), metryki DQ, alert `outside_model_band` vs `sensor_fault`; **RLS**: ten sam dashboard jako użytkownik JP i PL | dwa konta testowe w różnych grupach |
+| 21–26 | Aplikacja AI | „czy awaria w Lubiatowie skazi Lębork?” (widoczny SQL, liczby z `gold_city_exposure`), 1 metodologiczne („co znaczy 37 kBq/m²?”, cytaty), 1 o niemodelowanej lokalizacji (poprawna odmowa) | lista pytań sprawdzonych na zestawie ewaluacyjnym + pytania zapasowe |
 | 26–30 | Trade-offs | koszty, ograniczenia modelu (w tym: symulowane czujniki ≠ walidacja modelu), rola AI w developmencie | slajd z Części VIII i V |
 
 **Zasada:** każdy krok na żywo ma zrzut ekranu/nagranie jako plan B. Q&A: przygotować
 odpowiedzi na „dlaczego nie sam watermark?”, „czy alerty dowodzą trafności modelu?”,
-„co jest ręcznie w PROD?”.
+„co jest ręcznie w PROD?”, „skąd wiesz, że model działa dla Polski, skoro nie masz tam
+pomiarów?”, „czemu LLM nie może sam oszacować skażenia?”.
