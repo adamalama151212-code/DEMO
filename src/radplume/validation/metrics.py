@@ -3,7 +3,8 @@
 Źródło pomiarów (plan 2.4): JAEA EMDB — pomiary lotnicze MEXT/DOE i próbki gleby
 z Fukushimy. Repozytorium NIE zawiera tych danych (licencja, rozmiar, i nie
 chcemy „przykładowych” liczb udających pomiary). Pobierz je samodzielnie i zapisz
-jako CSV w ``<landing>/validation/`` w formacie:
+jako CSV w ``<landing>/validation/deposition/`` w formacie
+(szczegóły: docs/przygotowanie-danych.md):
 
     site_id,lat,lon,nuclide,measured_kbq_m2,source
     fukushima_daiichi,37.60,140.75,Cs-137,1234.5,JAEA-airborne-2011

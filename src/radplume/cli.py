@@ -16,7 +16,7 @@ import argparse
 import logging
 import sys
 
-from radplume.config import load_config
+from radplume.core.config import load_config
 
 # Tryb offline pisze do OSOBNEGO katalogu: pliki landing działają jak cache, więc
 # syntetyczne meteo w `data/` zostałoby potem po cichu użyte zamiast prawdziwego.
@@ -29,9 +29,9 @@ OFFLINE_OVERRIDES = {
 def _context(args):
     # Import Sparka dopiero tutaj: `radplume --help` działa natychmiast,
     # bez uruchamiania JVM.
-    from radplume.pipeline_batch import Context
-    from radplume.session import get_spark
-    from radplume.storage import Storage
+    from radplume.core.session import get_spark
+    from radplume.core.storage import Storage
+    from radplume.pipelines.context import Context
 
     cfg = load_config(args.env, OFFLINE_OVERRIDES if args.offline else None)
     spark = get_spark(cfg)
@@ -39,8 +39,8 @@ def _context(args):
 
 
 def main(argv: list[str] | None = None) -> int:
-    from radplume.pipeline_batch import BATCH_STEPS
-    from radplume.pipeline_stream import STREAM_STEPS
+    from radplume.pipelines.batch import BATCH_STEPS
+    from radplume.pipelines.stream import STREAM_STEPS
 
     all_steps = {**BATCH_STEPS, **STREAM_STEPS}
     parser = argparse.ArgumentParser(prog="radplume", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -80,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     logging.getLogger("py4j").setLevel(logging.WARNING)
 
     ctx = _context(args)
-    from radplume.pipeline_stream import STREAM_ORDER
+    from radplume.pipelines.stream import STREAM_ORDER
 
     batch_order = list(BATCH_STEPS)
     if args.command in all_steps:

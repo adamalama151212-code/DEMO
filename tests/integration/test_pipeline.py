@@ -1,12 +1,10 @@
 """Potok batch end-to-end w małej skali: poprawność, statystyka MC i idempotencja (plan 4.5)."""
 
-import hashlib
-
 import pytest
 from pyspark.sql import functions as F
 
 from radplume.gold.aggregates import nearest_rank
-from radplume.pipeline_batch import BATCH_STEPS
+from radplume.pipelines.batch import BATCH_STEPS
 
 STEPS = ["ingest-meteo", "ingest-cities", "bronze", "silver", "dispersion", "gold"]
 
@@ -16,19 +14,38 @@ def _run(ctx):
         BATCH_STEPS[s](ctx)
 
 
-def _checksum(df):
-    """Suma kontrolna tabeli niezależna od kolejności wierszy i partycji."""
-    rows = sorted(str(sorted(r.asDict().items())) for r in df.collect())
-    return hashlib.sha256("\n".join(rows).encode()).hexdigest()
+def _norm(v):
+    """Liczby zmiennoprzecinkowe z dokładnością do 10 cyfr znaczących.
+
+    Spark sumuje wartości w kolejności, w jakiej partycje docierają do agregacji,
+    a dodawanie floatów nie jest łączne — dwa przebiegi na tych samych danych mogą
+    różnić się na ostatnim bicie (~1e-16). Idempotencja biznesowa = te same wartości
+    z dokładnością numeryczną, a nie identyczność bitowa.
+    """
+    if isinstance(v, float):
+        return f"{v:.10g}"
+    if isinstance(v, list):
+        return [_norm(x) for x in v]
+    return v
+
+
+def _rows(df):
+    """Wiersze tabeli jako zbiór — porównanie niezależne od kolejności wierszy i partycji.
+
+    Zbiór ukryłby duplikaty, dlatego osobno sprawdzamy, że żaden wiersz się nie powtarza.
+    """
+    rows = [str(sorted((k, _norm(v)) for k, v in r.asDict().items())) for r in df.collect()]
+    assert len(rows) == len(set(rows)), f"{len(rows) - len(set(rows))} zduplikowanych wierszy"
+    return set(rows)
 
 
 @pytest.fixture(scope="module")
 def pipeline_ctx(spark, tmp_path_factory):
     import os
 
-    from radplume.config import load_config
-    from radplume.pipeline_batch import Context
-    from radplume.storage import Storage
+    from radplume.core.config import load_config
+    from radplume.core.storage import Storage
+    from radplume.pipelines.context import Context
     from tests.conftest import TEST_OVERRIDES
 
     os.environ["RADPLUME_DATA_DIR"] = str(tmp_path_factory.mktemp("pipe") / "data")
@@ -42,11 +59,18 @@ def pipeline_ctx(spark, tmp_path_factory):
 def test_rerun_is_idempotent(pipeline_ctx):
     """Dwa przebiegi → identyczne sumy kontrolne gold i brak zdublowanych godzin w bronze."""
     st = pipeline_ctx.storage
-    before = {t: _checksum(st.read("gold", t)) for t in ("risk_map", "city_exposure", "site_ranking")}
+    tables = ("risk_map", "city_exposure", "site_ranking")
+    before = {t: _rows(st.read("gold", t)) for t in tables}
     n_bronze = st.read("bronze", "meteo").count()
     _run(pipeline_ctx)
-    after = {t: _checksum(st.read("gold", t)) for t in ("risk_map", "city_exposure", "site_ranking")}
-    assert before == after
+    after = {t: _rows(st.read("gold", t)) for t in tables}
+    for t in tables:
+        # Porównanie wierszy (a nie tylko hashy), żeby przy błędzie było widać, CO się zmieniło.
+        only_before, only_after = before[t] - after[t], after[t] - before[t]
+        assert not only_before and not only_after, (
+            f"{t}: {len(only_before)} wierszy zniknęło, {len(only_after)} nowych, np. "
+            f"{sorted(only_before)[:1]} → {sorted(only_after)[:1]}"
+        )
     assert st.read("bronze", "meteo").count() == n_bronze
 
 

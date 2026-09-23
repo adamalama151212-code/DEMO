@@ -186,7 +186,8 @@ def aggregate_episodes(hourly: DataFrame, q_median: DataFrame, arrival_threshold
         # czas dotarcia: pierwsza godzina, w której depozycja (przy medianie Q) jest znacząca
         F.min(F.when(reached, F.col("arrival_h"))).alias("arrival_h"),
         # kierunek wiatru w godzinie, która dała NAJWIĘCEJ depozycji — do „najgorszego sektora”
-        F.max_by("wind_from_deg", "dep_hour").alias("dominant_wind_from_deg"),
+        # max ze struktury zamiast max_by: deterministyczne przy remisach (patrz gold.aggregates.argmax)
+        F.max(F.struct("dep_hour", "h", "wind_from_deg"))["wind_from_deg"].alias("dominant_wind_from_deg"),
     )
 
 

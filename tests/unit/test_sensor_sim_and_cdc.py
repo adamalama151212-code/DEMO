@@ -3,9 +3,9 @@
 import datetime as dt
 import math
 
-from radplume.ingest.device_registry import cdc_events, plan_devices
-from radplume.ingest.sensor_sim import SensorSimulator
 from radplume.silver.devices_cdc import CDC_SCHEMA, apply_scd2
+from radplume.simulators.device_registry import cdc_events, plan_devices
+from radplume.simulators.sensor_sim import SensorSimulator
 
 START = dt.datetime(2011, 3, 12, 12, 0)
 SITE = {"site_id": "s", "lat": 37.42, "lon": 141.03, "jurisdiction_code": "JP-07"}

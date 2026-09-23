@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from radplume.config import load_config
+from radplume.core.config import load_config
 
 # Mała skala testowa: sekundy zamiast minut, ale ta sama logika co w PROD.
 TEST_OVERRIDES = {
@@ -29,7 +29,7 @@ TEST_OVERRIDES = {
 
 @pytest.fixture(scope="session")
 def spark():
-    from radplume.session import get_spark
+    from radplume.core.session import get_spark
 
     cfg = load_config("local", TEST_OVERRIDES)
     s = get_spark(cfg)
@@ -45,8 +45,8 @@ def cfg():
 @pytest.fixture
 def ctx(spark, cfg, tmp_path, monkeypatch):
     """Kontekst potoku z izolowanym katalogiem danych."""
-    from radplume.pipeline_batch import Context
-    from radplume.storage import Storage
+    from radplume.core.storage import Storage
+    from radplume.pipelines.context import Context
 
     monkeypatch.setenv("RADPLUME_DATA_DIR", str(tmp_path / "data"))
     return Context(cfg, spark, Storage(spark, cfg))

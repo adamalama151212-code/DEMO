@@ -2,7 +2,7 @@
 
 import pytest
 
-from radplume.config import deep_merge, load_config
+from radplume.core.config import deep_merge, load_config
 
 
 def test_environments_share_physics_but_differ_in_storage():

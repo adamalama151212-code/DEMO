@@ -28,11 +28,9 @@ from pathlib import Path
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
+from radplume.core.dq_metrics import log_metrics
 from radplume.gold.live_alerts import build_dq_summary, build_live_alerts
-from radplume.ingest.device_registry import cdc_events, plan_devices, write_cdc
-from radplume.ingest.sensor_sim import DemoSchedule, SensorSimulator
-from radplume.ops_log import log_metrics
-from radplume.pipeline_batch import Context
+from radplume.pipelines.context import Context
 from radplume.silver.devices_cdc import apply_scd2, read_cdc
 from radplume.silver.sensor_clean import (
     SENSOR_SCHEMA,
@@ -43,6 +41,8 @@ from radplume.silver.sensor_clean import (
     split_late,
 )
 from radplume.silver.sensor_quality import build_sensor_quality
+from radplume.simulators.device_registry import cdc_events, plan_devices, write_cdc
+from radplume.simulators.sensor_sim import DemoSchedule, SensorSimulator
 
 log = logging.getLogger(__name__)
 

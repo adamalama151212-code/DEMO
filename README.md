@@ -61,8 +61,8 @@ rejestr urządzeń (INSERT/UPDATE/DELETE) ─► bronze.device_cdc ─► silver
 | Element | Plik | Po co |
 |---|---|---|
 | Konfiguracja | `src/radplume/conf/*.yaml` | fizyka, lokalizacje, progi skażenia, reguły DQ, środowiska local/dev/prod |
-| Sesja Spark | `src/radplume/session.py` | jedyne miejsce, które wie, czy działamy lokalnie, czy na Databricks |
-| Przechowywanie | `src/radplume/storage.py` | tabele Delta: lokalnie katalogi, w chmurze Unity Catalog |
+| Sesja Spark | `src/radplume/core/session.py` | jedyne miejsce, które wie, czy działamy lokalnie, czy na Databricks |
+| Przechowywanie | `src/radplume/core/storage.py` | tabele Delta: lokalnie katalogi, w chmurze Unity Catalog |
 | Model fizyczny | `src/radplume/silver/dispersion.py` | smuga gaussowska w czystym Sparku (Briggs, Pasquill, depozycja, rozpad) |
 | Agregacja MC | `src/radplume/gold/aggregates.py` | prawdopodobieństwa i percentyle po scenariuszach |
 | Czyszczenie czujników | `src/radplume/silver/sensor_clean.py`, `sensor_quality.py` | spóźnienia, duplikaty, spike, dryf, zamrożenie |
@@ -71,6 +71,44 @@ rejestr urządzeń (INSERT/UPDATE/DELETE) ─► bronze.device_cdc ─► silver
 
 Kod ma **dużo komentarzy** wyjaśniających, *dlaczego* wybrano dane rozwiązanie,
 a nie inne. Warto czytać go razem z planem.
+
+**Jakie dane musisz przygotować sam i gdzie je wrzucić:**
+[`docs/przygotowanie-danych.md`](docs/przygotowanie-danych.md). Do podstawowego
+przebiegu nie trzeba niczego; ręcznie pobierasz tylko dane do walidacji modelu.
+
+### Struktura repozytorium
+
+```
+.
+├── src/radplume/
+│   ├── conf/          # YAML: środowiska (local/dev/prod) + domena (fizyka, lokalizacje, progi, DQ)
+│   ├── core/          # infrastruktura: config, sesja Spark, storage (ścieżki / Unity Catalog), metryki DQ
+│   ├── ingest/        # konektory do PRAWDZIWYCH źródeł → strefa landing (Open-Meteo, GeoNames)
+│   ├── simulators/    # generatory danych SYMULOWANYCH (czujniki, rejestr CDC) — osobno od ingest/
+│   ├── bronze/        # landing → surowe tabele Delta + metadane pochodzenia
+│   ├── silver/        # czyszczenie, walidacja, obliczenia fizyczne (czyste funkcje DataFrame → DataFrame)
+│   ├── gold/          # agregaty biznesowe: mapa ryzyka, narażenie miast, alerty
+│   ├── validation/    # ocena modelu na niezależnych pomiarach (FAC2/FAC5)
+│   ├── app/           # warstwa serwująca: pytania o miasta, guardrails SQL
+│   ├── pipelines/     # orkiestracja: kolejność kroków (1 krok = 1 task Joba), bez logiki obliczeń
+│   └── cli.py         # punkt wejścia `radplume <krok>` (lokalnie i na Databricks)
+├── tests/
+│   ├── unit/          # szybkie testy pojedynczych funkcji (fizyka, meteo, DQ, CDC, guardrails)
+│   └── integration/   # potok end-to-end w małej skali (idempotencja, spójność wyników)
+├── resources/         # zasoby Databricks Asset Bundle (Joby) — szkielet
+├── docs/              # dokumentacja: przygotowanie danych
+├── data/              # (git-ignored) landing, tabele Delta, checkpointy — tworzone przy uruchomieniu
+├── databricks.yml     # definicja bundla (targety dev/prod)
+├── Dockerfile, docker-compose.yml
+└── plan_finalny_radplume.md, final-project-spec.md
+```
+
+Zasady podziału (typowe dla projektów data engineering):
+- **Transformacje** (`bronze/silver/gold`) to czyste funkcje: nie czytają konfiguracji ani plików
+  same, więc da się je testować na małych DataFrame'ach.
+- **Orkiestracja** (`pipelines/`) tylko czyta tabele wejściowe, woła transformację i zapisuje wynik.
+- **Infrastruktura** (`core/`) to jedyne miejsce zależne od środowiska (lokalnie / Databricks).
+- **Dane prawdziwe** (`ingest/`) i **symulowane** (`simulators/`) są rozdzielone, żeby od razu było widać, co jest realne.
 
 ---
 
@@ -251,7 +289,7 @@ Lokalnie tabele leżą w `data/delta/<warstwa>/<tabela>/`, na Databricks jako
 
 ## Demo czujników (brudne dane)
 
-Symulator (`ingest/sensor_sim.py`) generuje odczyty 10 stacji wokół Fukushimy
+Symulator (`simulators/sensor_sim.py`) generuje odczyty 10 stacji wokół Fukushimy
 w pogodzie z marca 2011. Scenariusz demo wymusza każdy przypadek w przewidywalnym
 momencie:
 
@@ -309,7 +347,8 @@ Katalog danych możesz przenieść zmienną `RADPLUME_DATA_DIR`.
 Repozytorium celowo **nie** zawiera pomiarów. Nie ma w nim „przykładowych” liczb
 udających dane z Fukushimy. Pobierz pomiary depozycji Cs-137 z
 [JAEA EMDB](https://emdb.jaea.go.jp/emdb/) (pomiary lotnicze MEXT/DOE, próbki
-gleby) i zapisz jako CSV w `data/landing/validation/`:
+gleby) i zapisz jako CSV w `data/landing/validation/deposition/`
+(szczegóły, format i pułapki: [`docs/przygotowanie-danych.md`](docs/przygotowanie-danych.md)):
 
 ```csv
 site_id,lat,lon,nuclide,measured_kbq_m2,source
@@ -351,7 +390,7 @@ To, co się zmienia, jest **wyłącznie** w konfiguracji i w pliku bundla:
 |---|---|
 | `storage.mode: path` → `data/delta/...` | `storage.mode: catalog` → `radplume_dev.silver.meteo` (Unity Catalog) |
 | `data/landing/` | volume `/Volumes/radplume_dev/raw/landing` |
-| sesja budowana w `session.py` | sesja klastra (`DATABRICKS_RUNTIME_VERSION` wykryte automatycznie) |
+| sesja budowana w `core/session.py` | sesja klastra (`DATABRICKS_RUNTIME_VERSION` wykryte automatycznie) |
 | Structured Streaming z katalogu plików | Auto Loader (`cloudFiles`) + `schemaEvolutionMode=addNewColumns` |
 | SCD2 funkcjami okna (`silver/devices_cdc.py`) | `dlt.create_auto_cdc_flow(..., stored_as_scd_type=2)` |
 | `radplume <krok>` w terminalu | task Lakeflow Joba (`resources/job_radplume.yml`) z tym samym entry pointem |

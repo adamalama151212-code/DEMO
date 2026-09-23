@@ -15,37 +15,24 @@ from __future__ import annotations
 import glob
 import logging
 import os
-from dataclasses import dataclass
 
-from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 
 from radplume.bronze.cities import read_cities
 from radplume.bronze.meteo import BRONZE_METEO_KEYS, read_landing_meteo
-from radplume.config import active_sites
+from radplume.core.config import active_sites
+from radplume.core.dq_metrics import log_metrics
 from radplume.gold import aggregates as agg
 from radplume.ingest.cities import ingest_cities
 from radplume.ingest.meteo import ingest_meteo
-from radplume.ops_log import log_metrics
+from radplume.pipelines.context import Context
 from radplume.silver import dispersion as disp
 from radplume.silver.grid import assign_points_to_cells, build_grid, sites_df
 from radplume.silver.meteo import build_silver_meteo
 from radplume.silver.scenarios import build_scenarios
-from radplume.storage import Storage
 from radplume.validation.metrics import read_measurements, validation_points, validation_summary
 
 log = logging.getLogger(__name__)
-
-
-@dataclass
-class Context:
-    cfg: dict
-    spark: SparkSession
-    storage: Storage
-
-    @property
-    def run(self) -> dict:
-        return self.cfg["run"]
 
 
 # ----------------------------------------------------------------------------- ingest
@@ -166,11 +153,11 @@ def step_gold(ctx: Context) -> None:
 
 def step_validation(ctx: Context) -> None:
     st = ctx.storage
-    pattern = st.landing("validation", "*.csv")
+    pattern = st.landing("validation", "deposition", "*.csv")
     if st.mode == "path" and not glob.glob(pattern):
         log.warning(
             "validation: brak pomiarów w %s — pomijam. Format pliku opisany w "
-            "radplume/validation/metrics.py (dane JAEA EMDB, plan 2.4).", os.path.dirname(pattern)
+            "docs/przygotowanie-danych.md (dane JAEA EMDB, plan 2.4).", os.path.dirname(pattern)
         )
         return
     points = validation_points(

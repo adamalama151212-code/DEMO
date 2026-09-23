@@ -25,6 +25,18 @@ from radplume import MODEL_VERSION
 SECTORS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"]
 
 
+def argmax(value_col: str, order_col: str, tiebreak_col: str | None = None) -> Column:
+    """Deterministyczny odpowiednik ``max_by``.
+
+    ``F.max_by`` przy remisie (np. kilka miast z tym samym p_exceed) zwraca
+    wiersz zależny od kolejności partycji — dwa przebiegi na tych samych danych
+    mogły dać inny wynik, co łamało idempotencję. Maksimum ze struktury
+    (wartość sortująca, rozstrzygacz remisu) jest zawsze takie samo.
+    """
+    tb = tiebreak_col or value_col
+    return F.max(F.struct(F.col(order_col).alias("o"), F.col(tb).alias("t"), F.col(value_col).alias("v")))["v"]
+
+
 def thresholds_df(spark: SparkSession, cfg: dict) -> DataFrame:
     """Progi przeliczone na depozycję [kBq/m²] — jedna jednostka porównań w gold.
 
@@ -141,7 +153,7 @@ def build_city_exposure(
         .groupBy("scenario_set", "site_id", "city_id", "nuclide", "sector")
         .agg(F.sum("unit_dep_per_bq").alias("s"))
         .groupBy("scenario_set", "site_id", "city_id", "nuclide")
-        .agg(F.max_by("sector", "s").alias("worst_wind_sector"))
+        .agg(argmax("sector", "s").alias("worst_wind_sector"))
     )
 
     # Szkielet: każde miasto × zestaw scenariuszy × nuklid — także bez żadnej depozycji.
@@ -169,7 +181,7 @@ def build_site_ranking(city_exposure: DataFrame) -> DataFrame:
     ).agg(
         F.sum(F.col("population") * F.col("p_exceed")).alias("expected_exposed_population"),
         F.count_if(F.col("p_exceed") >= 0.1).alias("n_cities_p_ge_10pct"),
-        F.max_by("city_name", "p_exceed").alias("most_exposed_city"),
+        argmax("city_name", "p_exceed", "city_id").alias("most_exposed_city"),
         F.max("p_exceed").alias("max_city_p_exceed"),
         F.count("*").alias("n_cities_in_radius"),
     )

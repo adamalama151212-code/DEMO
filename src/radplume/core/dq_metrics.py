@@ -12,7 +12,7 @@ import logging
 
 from pyspark.sql import types as T
 
-from radplume.storage import Storage
+from radplume.core.storage import Storage
 
 log = logging.getLogger(__name__)
 
