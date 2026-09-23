@@ -33,6 +33,7 @@ oraz plan wdrożenia na Databricks (DEV → PROD przez CI/CD).
 | P18 | z-score na surowej dawce nie wykryje dryfu (szum σ=0.35 → z≈1.2) i myli przejście smugi z dryfem; reguła DQ może stłumić prawdziwy alert ×5 | dryf wykrywany na **reszcie względem modelu** (średnia 30 min z `ln(dose / (tło + mediana_modelu))`); podwyższona reszta potwierdzona przez sąsiadów w promieniu 5 km = sygnał, nie usterka | 3.5.3, 4.4a |
 | P19 | dashboard AI/BI z osadzonymi poświadczeniami pokazuje wszystkim wiersze autora — RLS „nie działa” na demo; app działa jako SP | publikacja **bez embed credentials**; Databricks App z autoryzacją on-behalf-of-user | 4.6, 4.7, 4.8 |
 | P20 | skala PROD 200×200×72h×500×3 = ~4,3 mld obliczeń — sprzeczne z „nie celuj w miliardy”; trial DEV może wygasnąć przed demo | PROD: siatka 100×100 po 2 km (±100 km), 200 epizodów × 5 wariantów fizycznych × 2 nuklidy; Q jako mnożnik (liniowość modelu); koszt DEV po trialu doliczony | 3.4, 4.2, V |
+| P21 | test API Open-Meteo (Lubiatowo, 01–02.01.2020): wiatr domyślnie w **km/h**; kierunek to konwencja meteorologiczna (**skąd** wieje); `elevation: 0.0` także z `cell_selection=land` — przybliżone współrzędne leżą na linii brzegowej; brak zmiennych do klasy Pasquilla | jednostka wymuszona w zapytaniu i sprawdzana w bronze; kierunek smugi = kierunek wiatru + 180° z testem; współrzędne z dokumentów PEJ; pełna lista zmiennych | 2.4.1, 3.2, 3.3 |
 
 ---
 
@@ -219,6 +220,54 @@ w trybie klimatologicznym, a jego wiarygodność opiera się na walidacji przepr
 **tym samym kodem**. Walidacja na Czarnobylu w Polsce odpada: ~600–900 km od źródła to poza
 zakresem stosowalności modelu gaussowskiego.
 
+#### 2.4.1 Ingest meteo — wnioski z testu API (P21)
+
+Test ręczny: `latitude=54.81&longitude=17.83`, 01–02.01.2020 → HTTP 200, 48 godzin bez luk,
+czas w UTC, wiatr 4–10 m/s z kierunków 226–311° (przejście frontu), opad ~0. Dane sensowne,
+ale test ujawnił trzy pułapki, które bez zabezpieczeń dają **cicho błędny** wynik:
+
+1. **Jednostka wiatru.** Bez `wind_speed_unit=ms` API zwraca **km/h**. Wiatr 3,6× za duży
+   = zaniżone stężenia i złe klasy stabilności, bez żadnego błędu w logach.
+   - jednostka wymuszona w zapytaniu: `&wind_speed_unit=ms`
+   - kontrola w bronze: `hourly_units.wind_speed_10m == "m/s"`, inaczej ingest kończy się błędem
+     (plik odrzucony, nie konwertowany „po cichu”)
+2. **Konwencja kierunku.** `wind_direction_10m` to kierunek, **z którego** wieje wiatr
+   (meteorologiczny). Smuga leci w stronę `(wind_direction + 180) mod 360`. Przykład z testu:
+   wiatr 311° (z NW) → smuga na 131° (SE) — dokładnie w stronę Wejherowa i Gdyni (~125–130°
+   od Lubiatowa). Pomyłka obraca całą mapę ryzyka o 180°.
+   - konwersja w jednym miejscu (`silver/meteo.py`), rozkład na składowe `u`, `v`
+   - test jednostkowy: wiatr 270° → smuga na wschód (dodatnie `u`), wiatr 0° → smuga na południe
+3. **Współrzędne i wysokość.** API przyciąga punkt do swojej siatki (zwrócone
+   `54.79789, 17.821783`) i raportuje `elevation: 0.0` — również z `cell_selection=land`.
+   Przybliżone współrzędne z planu leżą na linii brzegowej.
+   - dokładne współrzędne terenu elektrowni wziąć z dokumentów PEJ i wpisać do `sites.yaml`
+   - w bronze zapisywać **obie** pary: żądaną (`req_lat`, `req_lon`) i zwróconą (`grid_lat`,
+     `grid_lon`, `grid_elevation`)
+   - ostrzeżenie DQ (`expect`, nie drop), gdy `grid_elevation <= 0` dla lokalizacji lądowej
+
+**Docelowe zapytanie** (zmienne potrzebne do klasy Pasquilla i wysokości uwolnienia):
+
+```
+https://archive-api.open-meteo.com/v1/archive
+  ?latitude=<lat>&longitude=<lon>
+  &start_date=<YYYY-MM-DD>&end_date=<YYYY-MM-DD>
+  &hourly=wind_speed_10m,wind_direction_10m,wind_speed_100m,wind_direction_100m,
+          precipitation,cloud_cover,shortwave_radiation
+  &wind_speed_unit=ms
+  &timezone=GMT
+  &cell_selection=land
+```
+
+| Zmienna | Po co |
+|---|---|
+| `wind_speed_10m`, `wind_direction_10m` | transport smugi przy gruncie, klasa Pasquilla |
+| `wind_speed_100m`, `wind_direction_100m` | uwolnienie z wysokości (komin/budynek reaktora); profil wiatru |
+| `cloud_cover` | klasa stabilności w nocy (zachmurzenie) |
+| `shortwave_radiation` | klasa stabilności w dzień (nasłonecznienie) — zamiast liczenia wysokości Słońca |
+| `precipitation` | depozycja mokra |
+
+Wszystkie czasy trzymane w UTC; Japonia (UTC+9) przeliczana dopiero w warstwie prezentacji.
+
 ---
 
 ## CZĘŚĆ III — Faza 0: PoC lokalny (8–12 dni)
@@ -265,6 +314,7 @@ radplume/
 │   └── text_to_sql_eval.yaml   # 20–30 pytań + oczekiwany wynik na Gold
 ├── tests/
 │   ├── test_physics.py         # wartości analityczne + bilans masy
+│   ├── test_meteo.py           # jednostka m/s, kierunek skąd→dokąd (270° → wschód), UTC
 │   ├── test_schemas.py
 │   ├── test_idempotency.py
 │   ├── test_sensor_dq.py       # podział po lag, spike, dryf, frozen, quarantine
@@ -277,9 +327,9 @@ radplume/
 | # | Etap | Gotowe gdy |
 |---|---|---|
 | 1 | Szkielet, sesja, config, Delta | pusty przebieg tworzy tabelę Delta |
-| 2 | Ingest meteo (Open-Meteo, Fukushima 03/2011) | `bronze_meteo` z `ingest_timestamp`, `source_file` |
+| 2 | Ingest meteo (Open-Meteo, Fukushima 03/2011 + Lubiatowo) | `bronze_meteo` z `ingest_timestamp`, `source_file`, żądanymi i zwróconymi współrzędnymi; ingest odrzuca plik z jednostką inną niż m/s (2.4.1) |
 | 3 | Siatka + scenariusze MC | odtwarzalne przy tym samym seedzie; **CRS zapisany w schemacie** |
-| 4 | Silver: meteo, klasa Pasquilla | rozkład klas sensowny (noc = stabilne) |
+| 4 | Silver: meteo, klasa Pasquilla | rozkład klas sensowny (noc = stabilne); `test_meteo.py` zielony — kierunek smugi = wiatr + 180° |
 | 5 | **Fizyka na jednym wierszu** ⚠️ | 3 testy: oś smugi, punkt boczny, **bilans masy** |
 | 6 | Silver: pełna dyspersja | ~10 mln wierszy < 5 min; mapa smugi zgodna z kierunkiem wiatru |
 | 7 | Gold | `percentile_approx`, mapa prawdopodobieństwa czytelna |
@@ -701,7 +751,8 @@ warto wybrać 2–3, które dają najwięcej różnorodności bez rozdmuchania z
   błędu lokalnego czujnika, a nie realnego zjawiska pogodowego
 - **Spójność wewnętrzna rekordu** — np. `battery = 0`, a urządzenie mimo to wysyła dane =
   sprzeczność, osobna reguła walidacyjna
-- **Błędna jednostka po "aktualizacji firmware"** — zasymulowany czujnik, który w pewnym
+- **Błędna jednostka po "aktualizacji firmware"** — (realny odpowiednik złapany już przy
+  teście Open-Meteo: domyślne km/h zamiast m/s, patrz 2.4.1) — zasymulowany czujnik, który w pewnym
   momencie zaczyna wysyłać dane w złej jednostce (np. km/h zamiast m/s); wykrywane po nagłej
   zmianie rzędu wielkości całej serii czasowej, nie pojedynczego odczytu
 
@@ -1060,6 +1111,7 @@ nie rozbudowuj fizyki kosztem bloków 4–7.
 
 **Engineering quality**
 - [ ] testy fizyki z wartościami analitycznymi + bilans masy
+- [ ] testy meteo: jednostka m/s wymuszona i sprawdzana, kierunek smugi = wiatr + 180°, UTC (P21)
 - [ ] testy schematów, testy idempotencji
 - [ ] **testy DQ czujników: lag 10/20 min, duplikat, spike, dryf, frozen, warm-up, odchylenie obszarowe ≠ dryf**
 - [ ] test generatora: seed → identyczny wynik, dawka zgodna z pasmem modelu
@@ -1130,6 +1182,7 @@ kryzysowych ani produktem regulacyjnym.
 |---|---|
 | Walidacja wypadnie słabo | to nadal wynik — opisać dlaczego; rubryka nagradza uczciwość |
 | Klaster streamingowy przepala budżet | `Trigger.AvailableNow`, włączany tylko na demo |
+| Błędna jednostka lub konwencja kierunku wiatru z API (cicho błędny wynik) | `wind_speed_unit=ms` + kontrola `hourly_units` w bronze; test „270° → smuga na wschód” (2.4.1) |
 | Rozjazd CRS między siatką a rastrem ludności | wspólny EPSG ustalony na starcie, zapisany w schemacie |
 | Text-to-SQL halucynuje na demo | ograniczony schemat, przygotowane pytania zapasowe, widoczny SQL |
 | Trial DEV wygasa w trakcie | trial dopiero po ukończeniu PoC lokalnego |
