@@ -74,6 +74,8 @@ a nie inne. Warto czytać go razem z planem.
 
 **Jak to jest zbudowane i dlaczego:** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
+**Jak czytać kod (od czego zacząć, za co odpowiada każdy plik):** [`docs/HOWTOREAD.md`](docs/HOWTOREAD.md).
+
 **Jakie dane musisz przygotować sam i gdzie je wrzucić:**
 [`docs/przygotowanie-danych.md`](docs/przygotowanie-danych.md). Do podstawowego
 przebiegu nie trzeba niczego; ręcznie pobierasz tylko dane do walidacji modelu.
@@ -98,7 +100,7 @@ przebiegu nie trzeba niczego; ręcznie pobierasz tylko dane do walidacji modelu.
 │   ├── unit/          # szybkie testy pojedynczych funkcji (fizyka, meteo, DQ, CDC, guardrails)
 │   └── integration/   # potok end-to-end w małej skali (idempotencja, spójność wyników)
 ├── resources/         # zasoby Databricks Asset Bundle (Joby) — szkielet
-├── docs/              # dokumentacja: architektura, przygotowanie danych
+├── docs/              # dokumentacja: architektura, jak czytać kod, przygotowanie danych
 ├── data/              # (git-ignored) landing, tabele Delta, checkpointy — tworzone przy uruchomieniu
 ├── databricks.yml     # definicja bundla (targety dev/prod)
 ├── Dockerfile, docker-compose.yml
