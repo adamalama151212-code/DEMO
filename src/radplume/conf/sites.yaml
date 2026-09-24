@@ -31,6 +31,9 @@ sites:
       episode_start: "2011-03-12T06:00:00"
       episode_hours: 96
       meteo_range: ["2011-03-11", "2011-03-20"]
+      # Niepewność ilości, gdy przebieg uwolnienia pochodzi z pliku (Katata/Terada):
+      # szacunki w literaturze różnią się ok. 2–3 razy.
+      source_term_gsd: 2.0
 
   fukushima_daini:
     name: "Fukushima Daini"

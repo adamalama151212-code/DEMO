@@ -30,6 +30,25 @@ physics:
   # Stabilna atmosfera (E, F) = silniejszy wzrost wiatru z wysokością.
   wind_profile_exponent: {A: 0.07, B: 0.07, C: 0.10, D: 0.15, E: 0.35, F: 0.55}
 
+  # Model transportu (plan rozszerzeń, etap 3):
+  #   puff     — obłok z każdej godziny uwolnienia przesuwany co `step_minutes` wiatrem
+  #              z danej godziny; chmura skręca razem z wiatrem (domyślny),
+  #   straight — każda godzina uwolnienia to prosta smuga z wiatrem tej godziny
+  #              (stary model, zostawiony do porównań w write-upie).
+  transport:
+    model: straight   # etap 3 planu przełączy na puff
+    step_minutes: 15
+    # Jak długo śledzimy obłok po uwolnieniu. Przy 2 m/s to ~130 km, czyli więcej niż
+    # domena ±100 km; szybciej wiejący wiatr wynosi obłok poza domenę wcześniej.
+    horizon_hours: 18
+
+  # Zaburzenia pogody w trybie zdarzenia (radplume event). Stałe dla członka zespołu:
+  # odpowiadają systematycznemu błędowi reanalizy/prognozy dla danego dnia.
+  event_perturbation:
+    wind_dir_sigma_deg: 15        # odchylenie standardowe kierunku wiatru
+    wind_speed_sigma: 0.2         # lognormal σ mnożnika prędkości (~±20%)
+    source_gsd: 2.0               # niepewność ilości podanej przez użytkownika (×/÷ 2)
+
   # Wiatr < 0,5 m/s: wzór gaussowski dzieli przez u i „wybucha”.
   # Cisza wiatrowa to znane ograniczenie modelu — obcinamy od dołu.
   min_wind_speed_ms: 0.5

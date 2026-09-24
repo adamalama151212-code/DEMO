@@ -20,6 +20,7 @@ from pyspark.sql import functions as F
 
 from radplume.bronze.cities import read_cities
 from radplume.bronze.meteo import BRONZE_METEO_KEYS, read_landing_meteo
+from radplume.bronze.source_term import read_source_term
 from radplume.core.config import active_sites
 from radplume.core.dq_metrics import log_metrics
 from radplume.gold import aggregates as agg
@@ -29,7 +30,7 @@ from radplume.pipelines.context import Context
 from radplume.silver import dispersion as disp
 from radplume.silver.grid import assign_points_to_cells, build_grid, sites_df
 from radplume.silver.meteo import build_silver_meteo
-from radplume.silver.scenarios import build_scenarios
+from radplume.silver.scenarios import NON_EVENT_SETS, build_scenarios
 from radplume.validation.metrics import read_measurements, validation_points, validation_summary
 
 log = logging.getLogger(__name__)
@@ -58,6 +59,10 @@ def step_bronze(ctx: Context) -> None:
         raise FileNotFoundError("Brak pliku miast w landing — uruchom najpierw ingest-cities")
     cities = read_cities(ctx.spark, city_files[0])
     st.overwrite(cities, "bronze", "cities")
+
+    # Przebieg uwolnienia (opcjonalny, ręcznie przygotowany plik — przygotowanie-danych.md pkt E).
+    if st.mode != "path" or glob.glob(st.landing("source_term", "*.csv")):
+        st.overwrite(read_source_term(ctx.spark, st.landing("source_term")), "bronze", "source_term")
 
 
 # ----------------------------------------------------------------------------- silver
@@ -89,47 +94,56 @@ def step_silver_base(ctx: Context) -> None:
     )
     st.overwrite(city_cells, "silver", "city_cells")
 
-    scenarios, q_samples = build_scenarios(ctx.spark, cfg)
-    st.overwrite(scenarios, "silver", "scenarios")
-    st.overwrite(q_samples, "silver", "q_samples")
+    # Plik z przebiegiem uwolnienia jest mały (dziesiątki–setki przedziałów) — collect() jest OK.
+    source_rows = (
+        [r.asDict() for r in st.read("bronze", "source_term").collect()] if st.exists("bronze", "source_term") else None
+    )
+    write_scenario_tables(ctx, build_scenarios(ctx.spark, cfg, source_rows), NON_EVENT_SETS)
 
 
-def _q_median(ctx: Context):
-    rows = [
-        (sid, nuc, float(st["median_bq"]))
-        for sid in ctx.run["sites"]
-        for nuc, st in ctx.cfg["sites"][sid]["source_term"].items()
-    ]
-    return ctx.spark.createDataFrame(rows, "site_id STRING, nuclide STRING, q_median_bq DOUBLE")
+def write_scenario_tables(ctx: Context, frames: dict, replace_where: str) -> None:
+    """Zapis czterech tabel scenariuszy tylko w wycinku ``replace_where``.
+
+    Krok `silver` podmienia wszystko POZA zdarzeniami, a `radplume event` — tylko
+    swoje zdarzenie. Dzięki temu oba nie kasują sobie nawzajem wyników.
+    """
+    for name, df in frames.items():
+        ctx.storage.overwrite(df, "silver", name, replace_where=replace_where)
 
 
-def step_dispersion(ctx: Context) -> None:
-    """Liczy smugi dla wszystkich scenariuszy, lokalizacja po lokalizacji.
+def compute_dispersion(ctx: Context, sets_filter: str) -> None:
+    """Model transportu dla zestawów scenariuszy spełniających ``sets_filter`` (SQL).
 
-    Pętla po LOKALIZACJACH (kilka), nie po danych: każda lokalizacja to osobny,
-    atomowy zapis ``replaceWhere site_id = …``. Awaria w połowie nie zostawia
-    tabeli w stanie mieszanym, a ponowne uruchomienie nadpisuje dokładnie ten wycinek.
+    Pętla po LOKALIZACJACH (kilka), nie po danych: każda lokalizacja to osobny, atomowy
+    zapis ``replaceWhere site_id = … AND <filtr>``. Awaria w połowie nie zostawia tabeli
+    w stanie mieszanym, a ponowne uruchomienie nadpisuje dokładnie ten wycinek.
     """
     st, cfg = ctx.storage, ctx.cfg
     meteo = st.read("silver", "meteo")
     grid = st.read("silver", "grid")
-    scenarios = st.read("silver", "scenarios")
+    scenarios = st.read("silver", "scenarios").where(sets_filter)
+    schedule = st.read("silver", "release_schedule").where(sets_filter)
+    q_median = disp.q_median_from_source_terms(st.read("silver", "source_terms").where(sets_filter))
     nuclides = disp.nuclides_df(ctx.spark, cfg["physics"])
-    q_median = _q_median(ctx)
 
     # Kontrola DQ: ile godzin epizodów nie ma danych meteo (dziura w danych = mniej obliczeń).
     needed = disp.episode_hours(scenarios).select("site_id", "time_utc").distinct()
     missing = needed.join(meteo.select("site_id", "time_utc"), ["site_id", "time_utc"], "left_anti").count()
     log_metrics(st, "dispersion", {"episode_hours_missing_meteo": missing})
 
-    for site_id in ctx.run["sites"]:
+    for site_id in sorted(r["site_id"] for r in scenarios.select("site_id").distinct().collect()):
         sc = scenarios.where(F.col("site_id") == site_id)
-        hourly = disp.hourly_unit_deposition(meteo, sc, grid, nuclides, cfg["physics"])
+        hourly = disp.unit_deposition(meteo, sc, schedule, grid, nuclides, cfg["physics"])
         episodes = disp.aggregate_episodes(hourly, q_median, cfg["physics"]["arrival_threshold_bq_m2"])
         st.overwrite(
             episodes, "silver", "dispersion_episode",
-            partition_by=["site_id"], replace_where=f"site_id = '{site_id}'",
+            partition_by=["site_id"], replace_where=f"site_id = '{site_id}' AND ({sets_filter})",
         )
+
+
+def step_dispersion(ctx: Context) -> None:
+    """Model transportu dla klimatologii i epizodów walidacyjnych (zdarzenia liczy `radplume event`)."""
+    compute_dispersion(ctx, NON_EVENT_SETS)
 
 
 # ----------------------------------------------------------------------------- gold
@@ -189,10 +203,13 @@ def step_expected_dose(ctx: Context) -> None:
         & (F.col("variant_id") == demo["variant_id"])
     )
     grid = st.read("silver", "grid").where(F.col("site_id") == demo["site_id"])
-    hourly = disp.hourly_unit_deposition(
-        st.read("silver", "meteo"), sc, grid, disp.nuclides_df(ctx.spark, cfg["physics"]), cfg["physics"]
+    set_filter = F.col("scenario_set") == demo["scenario_set"]
+    hourly = disp.unit_deposition(
+        st.read("silver", "meteo"), sc, st.read("silver", "release_schedule").where(set_filter), grid,
+        disp.nuclides_df(ctx.spark, cfg["physics"]), cfg["physics"],
     )
-    dose = disp.expected_dose_series(hourly, grid, _q_median(ctx))
+    q_median = disp.q_median_from_source_terms(st.read("silver", "source_terms").where(set_filter))
+    dose = disp.expected_dose_series(hourly, grid, q_median)
     st.overwrite(dose, "gold", "expected_dose")
 
 

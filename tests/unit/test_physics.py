@@ -12,6 +12,33 @@ from radplume.silver import dispersion as disp
 
 D = 3  # klasa Pasquilla D (neutralna)
 
+METEO_SCHEMA = (
+    "site_id STRING, time_utc TIMESTAMP, wind_speed_ms DOUBLE, wind_from_deg DOUBLE, "
+    "precip_mm_h DOUBLE, stability_idx INT"
+)
+
+
+def one_hour_meteo(spark, t0, wind_from, hours=1, speed=5.0):
+    """Stała pogoda przez ``hours`` godzin od ``t0`` (do testów modeli transportu)."""
+    import datetime as dt
+
+    rows = [("s", t0 + dt.timedelta(hours=h), speed, float(wind_from), 0.0, D) for h in range(hours)]
+    return spark.createDataFrame(rows, METEO_SCHEMA)
+
+
+def single_scenario(spark, t0, hours, release_hours=None):
+    """Jeden scenariusz (wariant centralny) + harmonogram: równomierny albo tylko wskazane godziny."""
+    from radplume.silver.scenarios import SCENARIO_SCHEMA, SCHEDULE_SCHEMA
+
+    scenarios = spark.createDataFrame(
+        [("c", "s", 0, t0, hours, 0, 0, 1.0, 1.0, 50.0, 0.0, 1.0)], SCENARIO_SCHEMA
+    )
+    rel = release_hours if release_hours is not None else list(range(hours))
+    schedule = spark.createDataFrame(
+        [("c", "s", n, h, 1.0 / len(rel)) for n in ("Cs-137", "I-131") for h in rel], SCHEDULE_SCHEMA
+    )
+    return scenarios, schedule
+
 
 def _one(spark, **cols):
     names = list(cols)
@@ -89,19 +116,15 @@ def test_plume_goes_downwind_only(spark, cfg):
     import datetime as dt
 
     t0 = dt.datetime(2020, 1, 1, tzinfo=dt.timezone.utc)
-    meteo = spark.createDataFrame(
-        [("s", t0, 5.0, 270.0, 90.0, 0.0, D)],
-        "site_id STRING, time_utc TIMESTAMP, wind_speed_ms DOUBLE, wind_from_deg DOUBLE, plume_to_deg DOUBLE, precip_mm_h DOUBLE, stability_idx INT",
-    )
-    scenarios = spark.createDataFrame(
-        [("c", "s", 0, t0, 1, 0, 0, 1.0, 1.0, 50.0)],
-        "scenario_set STRING, site_id STRING, episode_id INT, episode_start TIMESTAMP, episode_hours INT, variant_id INT, stability_shift INT, vd_mult DOUBLE, washout_mult DOUBLE, release_height_m DOUBLE",
-    )
+    meteo = one_hour_meteo(spark, t0, wind_from=270.0)
+    scenarios, schedule = single_scenario(spark, t0, hours=1)
     grid = spark.createDataFrame(
         [("s", f"c{x}_{y}", float(x), float(y)) for x in (-10, 10) for y in (-10, 0, 10)],
         "site_id STRING, cell_id STRING, x_km DOUBLE, y_km DOUBLE",
     )
-    out = disp.hourly_unit_deposition(meteo, scenarios, grid, disp.nuclides_df(spark, cfg["physics"]), cfg["physics"])
+    out = disp.hourly_unit_deposition(
+        meteo, scenarios, schedule, grid, disp.nuclides_df(spark, cfg["physics"]), cfg["physics"]
+    )
     cells = {r["cell_id"] for r in out.where("dep_hour > 0").select("cell_id").collect()}
     assert cells == {"c10_0"}  # na wschód i na osi smugi; ±10 km w poprzek to > 4σy przy 10 km
 

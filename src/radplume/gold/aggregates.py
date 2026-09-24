@@ -61,8 +61,8 @@ def thresholds_df(spark: SparkSession, cfg: dict) -> DataFrame:
 def scenario_counts(scenarios: DataFrame, q_samples: DataFrame) -> DataFrame:
     """Liczba wszystkich scenariuszy = (epizody × warianty) × próbki Q — mianownik prawdopodobieństw."""
     ev = scenarios.groupBy("scenario_set", "site_id").agg(F.count("*").alias("n_episode_variants"))
-    nq = q_samples.groupBy("site_id", "nuclide").agg(F.count("*").alias("n_q"))
-    return ev.join(nq, on="site_id").withColumn("n_total", F.col("n_episode_variants") * F.col("n_q"))
+    nq = q_samples.groupBy("scenario_set", "site_id", "nuclide").agg(F.count("*").alias("n_q"))
+    return ev.join(nq, on=["scenario_set", "site_id"]).withColumn("n_total", F.col("n_episode_variants") * F.col("n_q"))
 
 
 def nearest_rank(sorted_vals: Column, n_total: Column, q: float) -> Column:
@@ -74,8 +74,12 @@ def nearest_rank(sorted_vals: Column, n_total: Column, q: float) -> Column:
 
 
 def with_q(episodes: DataFrame, q_samples: DataFrame) -> DataFrame:
-    """Nakłada próbki Q: depozycja [kBq/m²] = unit × Q / 1000 (liniowość modelu)."""
-    return episodes.join(F.broadcast(q_samples), on=["site_id", "nuclide"]).withColumn(
+    """Nakłada próbki Q: depozycja [kBq/m²] = unit × Q / 1000 (liniowość modelu).
+
+    Próbki są per zestaw scenariuszy: klimatologia ma ilość z sites.yaml, walidacja
+    z pliku Katata, zdarzenie — podaną przez użytkownika.
+    """
+    return episodes.join(F.broadcast(q_samples), on=["scenario_set", "site_id", "nuclide"]).withColumn(
         "dep_kbq_m2", F.col("unit_dep_per_bq") * F.col("q_bq") / 1000.0
     )
 

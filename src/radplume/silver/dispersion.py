@@ -102,42 +102,77 @@ def episode_hours(scenarios: DataFrame) -> DataFrame:
     )
 
 
+def release_hours(meteo: DataFrame, scenarios: DataFrame, schedule: DataFrame) -> DataFrame:
+    """Godziny, w których COŚ się uwalnia, z pogodą tej godziny (po zaburzeniu członka zespołu).
+
+    Harmonogram (``silver.release_schedule``) mówi, jaki ułamek całkowitej ilości wychodzi
+    w godzinie h. Godziny bez uwolnienia odpadają już tutaj (join wewnętrzny), więc zrzut
+    „o 13:00 i o 16:00” liczy tylko 2 godziny zamiast całego okna.
+
+    Zaburzenie pogody (tryb zdarzenia): kierunek wiatru przesunięty o ``wind_dir_offset_deg``,
+    prędkość pomnożona przez ``wind_speed_mult``. W klimatologii to 0 i 1 — bez zmian.
+    """
+    rel_hours = schedule.select("scenario_set", "site_id", "h").distinct()
+    hours = episode_hours(scenarios).join(rel_hours, ["scenario_set", "site_id", "h"])
+    return hours.join(
+        meteo.select("site_id", "time_utc", "wind_speed_ms", "wind_from_deg", "precip_mm_h", "stability_idx"),
+        on=["site_id", "time_utc"],
+        how="inner",  # godzina bez meteo = brak obliczenia; liczone w metrykach DQ
+    )
+
+
+def perturbed_wind(df: DataFrame, physics: dict) -> DataFrame:
+    """Kierunek i prędkość po zaburzeniu + klasa stabilności wariantu + wiatr na wysokości uwolnienia."""
+    stab = F.least(F.greatest(F.col("stability_idx") + F.col("stability_shift"), F.lit(0)), F.lit(5))
+    from_p = F.pmod(F.col("wind_from_deg") + F.col("wind_dir_offset_deg"), F.lit(360.0))
+    return (
+        df.withColumn("stab", stab)
+        .withColumn("wind_from_p", from_p)
+        .withColumn("plume_to_p", F.pmod(from_p + F.lit(180.0), F.lit(360.0)))
+        .withColumn(
+            "u_h",
+            wind_at_height(
+                F.col("wind_speed_ms") * F.col("wind_speed_mult"), F.col("release_height_m"), F.col("stab"),
+                physics["wind_profile_exponent"], physics["min_wind_speed_ms"],
+            ),
+        )
+    )
+
+
+def washout_coeff() -> Column:
+    """Λ = a · P^b [1/s] — współczynnik wymywania deszczem (0, gdy nie pada)."""
+    return F.when(
+        F.col("precip_mm_h") > 0,
+        F.col("washout_a") * F.col("washout_mult") * F.pow(F.col("precip_mm_h"), F.col("washout_b")),
+    ).otherwise(F.lit(0.0))
+
+
 def hourly_unit_deposition(
     meteo: DataFrame,
     scenarios: DataFrame,
+    schedule: DataFrame,
     grid: DataFrame,
     nuclides: DataFrame,
     physics: dict,
 ) -> DataFrame:
-    """Depozycja [Bq/m² na 1 Bq uwolnienia] w każdej komórce od każdej godziny uwolnienia.
+    """MODEL „straight”: każda godzina uwolnienia to prosta, stacjonarna smuga z wiatrem tej godziny.
 
-    Wymiary: scenariusze (epizod × wariant) × godziny × komórki × nuklidy.
-    To jest „duży” iloczyn projektu — dlatego:
-    - siatka i nuklidy idą przez ``broadcast`` (małe tabele kopiowane do
-      każdego executora zamiast shuffle'a dużej strony),
+    Zwraca depozycję [Bq/m² na 1 Bq CAŁKOWITEGO uwolnienia] w każdej komórce od każdej
+    godziny uwolnienia. Wymiary: scenariusze × godziny uwolnienia × komórki × nuklidy —
+    to „duży” iloczyn projektu, dlatego:
+    - siatka i nuklidy idą przez ``broadcast`` (małe tabele kopiowane do executorów),
     - wiersze pod wiatr i daleko od osi smugi odcinamy PRZED agregacją.
+    Słabość: smuga leci prosto przez cały zasięg, choć wiatr zmienia się w czasie lotu
+    — dlatego domyślny jest model obłoków (``silver/puff.py``).
     """
-    hours = episode_hours(scenarios).join(
-        meteo.select(
-            "site_id", "time_utc", "wind_speed_ms", "wind_from_deg", "plume_to_deg",
-            "precip_mm_h", "stability_idx",
-        ),
-        on=["site_id", "time_utc"],
-        how="inner",  # godzina bez meteo = brak obliczenia; liczone w metrykach DQ
-    )
-    s = scenarios.join(hours, on=["scenario_set", "site_id", "episode_id", "episode_start", "episode_hours"])
-
-    stab = F.least(F.greatest(F.col("stability_idx") + F.col("stability_shift"), F.lit(0)), F.lit(5))
-    s = s.withColumn("stab", stab).withColumn(
-        "u_h",
-        wind_at_height(
-            F.col("wind_speed_ms"), F.col("release_height_m"), F.col("stab"),
-            physics["wind_profile_exponent"], physics["min_wind_speed_ms"],
-        ),
+    s = perturbed_wind(
+        scenarios.join(release_hours(meteo, scenarios, schedule),
+                       on=["scenario_set", "site_id", "episode_id", "episode_start", "episode_hours"]),
+        physics,
     )
 
     g = s.join(F.broadcast(grid.select("site_id", "cell_id", "x_km", "y_km")), on="site_id")
-    phi = F.radians("plume_to_deg")
+    phi = F.radians("plume_to_p")
     dx, dy = F.col("x_km") * 1000.0, F.col("y_km") * 1000.0
     # Obrót do układu smugi: x_down wzdłuż kierunku lotu, y_cross w poprzek.
     g = g.withColumn("x_down", dx * F.sin(phi) + dy * F.cos(phi)).withColumn(
@@ -149,28 +184,50 @@ def hourly_unit_deposition(
     g = g.withColumn("sigma_y", sy).withColumn("sigma_z", sz)
     g = g.where(F.abs(F.col("y_cross")) <= physics["crosswind_cutoff_sigmas"] * F.col("sigma_y"))
 
-    g = g.crossJoin(F.broadcast(nuclides))
+    # Nuklidy + ułamek uwolnienia tej godziny z harmonogramu (per nuklid).
+    g = g.crossJoin(F.broadcast(nuclides)).join(
+        F.broadcast(schedule), on=["scenario_set", "site_id", "nuclide", "h"]
+    )
     travel_s = F.col("x_down") / F.col("u_h")
     chi = ground_concentration_per_rate(
         F.col("u_h"), F.col("y_cross"), F.col("release_height_m"), F.col("sigma_y"), F.col("sigma_z")
     )
     column = column_per_rate(F.col("u_h"), F.col("y_cross"), F.col("sigma_y"))
-    # Uwolnienie 1 Bq rozłożone równo na episode_hours godzin → każda godzina wypuszcza 1/N Bq.
-    frac = F.lit(1.0) / F.col("episode_hours")
-    washout = F.when(
-        F.col("precip_mm_h") > 0,
-        F.col("washout_a") * F.col("washout_mult") * F.pow(F.col("precip_mm_h"), F.col("washout_b")),
-    ).otherwise(F.lit(0.0))
+    # Całka po czasie przejścia smugi z godziny h: masa tej godziny (ułamek × 1 Bq) × χ/q.
+    frac = F.col("release_fraction")
     dry = F.col("vd_ms") * F.col("vd_mult") * chi * frac
-    wet = washout * column * frac
+    wet = washout_coeff() * column * frac
     decay = F.exp(-F.col("decay_const") * travel_s)
 
     return g.select(
         "scenario_set", "site_id", "episode_id", "variant_id", "episode_start", "h",
-        "cell_id", "nuclide", "wind_from_deg", "groundshine",
+        "cell_id", "nuclide", F.col("wind_from_p").alias("wind_from_deg"), "groundshine",
         ((dry + wet) * decay).alias("dep_hour"),
         (F.col("h") + travel_s / 3600.0).alias("arrival_h"),
     )
+
+
+def unit_deposition(
+    meteo: DataFrame, scenarios: DataFrame, schedule: DataFrame, grid: DataFrame, nuclides: DataFrame, physics: dict
+) -> DataFrame:
+    """Wybór modelu transportu z konfiguracji (``physics.transport.model``).
+
+    Oba modele zwracają ten sam schemat, więc agregacja, gold i eksport dawki
+    dla czujników nie wiedzą, który model policzył wynik.
+    """
+    model = physics["transport"]["model"]
+    if model == "straight":
+        return hourly_unit_deposition(meteo, scenarios, schedule, grid, nuclides, physics)
+    if model == "puff":
+        from radplume.silver.puff import puff_unit_deposition
+
+        return puff_unit_deposition(meteo, scenarios, schedule, grid, nuclides, physics)
+    raise ValueError(f"Nieznany model transportu: {model!r} (dozwolone: puff, straight)")
+
+
+def q_median_from_source_terms(source_terms: DataFrame) -> DataFrame:
+    """Mediana ilości uwolnienia per zestaw scenariuszy — do progu „czas dotarcia” i dawki demo."""
+    return source_terms.select("scenario_set", "site_id", "nuclide", F.col("median_bq").alias("q_median_bq"))
 
 
 def aggregate_episodes(hourly: DataFrame, q_median: DataFrame, arrival_threshold_bq_m2: float) -> DataFrame:
@@ -179,7 +236,7 @@ def aggregate_episodes(hourly: DataFrame, q_median: DataFrame, arrival_threshold
     To utrwalamy w silver. Godzinowego wyniku NIE zapisujemy w trybie
     klimatologicznym (plan 3.4: „uwaga na eksplozję”) — byłby N razy większy.
     """
-    h = hourly.join(F.broadcast(q_median), on=["site_id", "nuclide"])
+    h = hourly.join(F.broadcast(q_median), on=["scenario_set", "site_id", "nuclide"])
     reached = F.col("dep_hour") * F.col("q_median_bq") >= arrival_threshold_bq_m2
     return h.groupBy("scenario_set", "site_id", "episode_id", "variant_id", "cell_id", "nuclide").agg(
         F.sum("dep_hour").alias("unit_dep_per_bq"),
@@ -201,7 +258,7 @@ def expected_dose_series(hourly: DataFrame, grid: DataFrame, q_median: DataFrame
     ale dla demo potoku czujników wystarczy.
     """
     h = (
-        hourly.join(F.broadcast(q_median), on=["site_id", "nuclide"])
+        hourly.join(F.broadcast(q_median), on=["scenario_set", "site_id", "nuclide"])
         .withColumn("arr_idx", F.floor("arrival_h").cast("int"))
         .withColumn("dose_contrib", F.col("dep_hour") * F.col("q_median_bq") / 1000.0 * F.col("groundshine"))
         .groupBy("site_id", "episode_start", "cell_id", "arr_idx")

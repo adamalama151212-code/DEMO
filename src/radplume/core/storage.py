@@ -138,7 +138,9 @@ class Storage:
         self._check_layer(layer)
         writer = self._writer(df, "overwrite", partition_by)
         if replace_where and self.exists(layer, name):
-            writer = writer.option("replaceWhere", replace_where)
+            # mergeSchema: nowa kolumna w danych (np. po rozszerzeniu schematu) zostanie
+            # dopisana do tabeli zamiast przerwać zapis.
+            writer = writer.option("replaceWhere", replace_where).option("mergeSchema", "true")
         else:
             # Pozwala zmienić schemat przy pełnym nadpisaniu (np. nowa kolumna w gold).
             writer = writer.option("overwriteSchema", "true")

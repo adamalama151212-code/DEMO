@@ -30,15 +30,15 @@ Obecny model ma trzy słabości, które wyszły w dyskusji:
 
 ## Etapy
 
-### Etap 1: Harmonogram uwolnienia ⬜
-- ⬜ `silver.source_terms` (scenario_set, site, nuclide, median_bq, gsd, source)
-- ⬜ `silver.release_schedule` (scenario_set, site, nuclide, h, release_fraction)
-- ⬜ `silver.q_samples` z kolumną `scenario_set`, losowane z `source_terms`
-- ⬜ klimatologia: harmonogram równomierny; walidacja: plik `landing/source_term/*.csv` (format z `przygotowanie-danych.md`, pkt E) albo równomierny z ostrzeżeniem
-- ⬜ `bronze.source_term` (plik źródłowy), rozkład przedziałów na godziny
-- ⬜ model (`straight`) używa `release_fraction` zamiast 1/N
-- ⬜ gold łączy próbki Q po `scenario_set`
-- ⬜ testy: rozkład przedziałów na godziny, suma ułamków = 1, brak pliku → równomierny
+### Etap 1: Harmonogram uwolnienia ✅
+- ✅ `silver.source_terms` (scenario_set, site, nuclide, median_bq, gsd, source)
+- ✅ `silver.release_schedule` (scenario_set, site, nuclide, h, release_fraction)
+- ✅ `silver.q_samples` z kolumną `scenario_set`, losowane z `source_terms`
+- ✅ klimatologia: harmonogram równomierny; walidacja: plik `landing/source_term/*.csv` (format z `przygotowanie-danych.md`, pkt E) albo równomierny z ostrzeżeniem
+- ✅ `bronze.source_term` (plik źródłowy), rozkład przedziałów na godziny
+- ✅ model (`straight`) używa `release_fraction` zamiast 1/N
+- ✅ gold łączy próbki Q po `scenario_set`
+- ✅ testy: rozkład przedziałów na godziny, suma ułamków = 1, brak pliku → równomierny
 
 ### Etap 2: Tryb zdarzenia ⬜
 - ⬜ `radplume event --site … --date … --release 13:00=1e15 --release 16:00-18:00=5e15 [--timezone Europe/Warsaw] [--name …]`
