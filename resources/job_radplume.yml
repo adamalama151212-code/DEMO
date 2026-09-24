@@ -1,0 +1,73 @@
+# =============================================================================
+# Lakeflow Job — orkiestracja ścieżki batch i czujników (plan 4.5). SZKIELET.
+#
+# Każdy task woła ten sam entry point co lokalnie: `radplume --env <env> <krok>`.
+# Zależności (depends_on) odtwarzają kolejność z `radplume run-all`.
+# Docelowo: czyszczenie czujników jako pipeline deklaratywny Lakeflow
+# (plan 4.4) oraz task `apply_governance` (sql/governance.sql) na początku.
+# =============================================================================
+resources:
+  jobs:
+    radplume_batch:
+      name: radplume-batch-${var.env}
+
+      job_clusters:
+        - job_cluster_key: main
+          new_cluster:
+            spark_version: 17.3.x-scala2.13   # DBR 17 = Spark 4.0 (jak lokalnie) — zweryfikować LTS
+            node_type_id: Standard_D4ds_v5
+            num_workers: 1
+            data_security_mode: SINGLE_USER   # wymagane dla Unity Catalog
+            spark_env_vars:
+              RADPLUME_ENV: ${var.env}
+
+      tasks:
+        - task_key: ingest_meteo
+          job_cluster_key: main
+          python_wheel_task: &wheel
+            package_name: radplume
+            entry_point: radplume
+            parameters: ["ingest-meteo"]
+          libraries: &libs
+            - whl: ./dist/*.whl
+
+        - task_key: ingest_cities
+          job_cluster_key: main
+          python_wheel_task: {<<: *wheel, parameters: ["ingest-cities"]}
+          libraries: *libs
+
+        - task_key: bronze
+          depends_on: [{task_key: ingest_meteo}, {task_key: ingest_cities}]
+          job_cluster_key: main
+          python_wheel_task: {<<: *wheel, parameters: ["bronze"]}
+          libraries: *libs
+
+        - task_key: silver
+          depends_on: [{task_key: bronze}]
+          job_cluster_key: main
+          python_wheel_task: {<<: *wheel, parameters: ["silver"]}
+          libraries: *libs
+
+        - task_key: dispersion
+          depends_on: [{task_key: silver}]
+          job_cluster_key: main
+          python_wheel_task: {<<: *wheel, parameters: ["dispersion"]}
+          libraries: *libs
+
+        - task_key: gold
+          depends_on: [{task_key: dispersion}]
+          job_cluster_key: main
+          python_wheel_task: {<<: *wheel, parameters: ["gold"]}
+          libraries: *libs
+
+        - task_key: validation
+          depends_on: [{task_key: gold}]
+          job_cluster_key: main
+          python_wheel_task: {<<: *wheel, parameters: ["validation"]}
+          libraries: *libs
+
+        - task_key: expected_dose
+          depends_on: [{task_key: gold}]
+          job_cluster_key: main
+          python_wheel_task: {<<: *wheel, parameters: ["expected-dose"]}
+          libraries: *libs

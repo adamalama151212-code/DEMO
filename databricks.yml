@@ -1,0 +1,48 @@
+# =============================================================================
+# Databricks Asset Bundle — SZKIELET pod blok 1–3 planu (jeszcze nie wdrażany).
+#
+# Idea przejścia z lokalnego PoC do chmury:
+#   - ten sam pakiet `radplume` budowany jako wheel (artifacts),
+#   - każdy krok CLI (`radplume <krok>`) = osobny task Lakeflow Joba,
+#   - `--env dev|prod` wybiera plik konfiguracji (Unity Catalog + volume zamiast
+#     katalogu `data/`), więc kod transformacji się nie zmienia.
+#
+# Przed pierwszym `databricks bundle deploy` (blok 1): uzupełnić `workspace.host`,
+# wykonać jednorazowy bootstrap (metastore, katalogi, volume `raw.landing`,
+# grupy, secret scope z Key Vault) i zweryfikować wersję runtime / typ węzła
+# w aktualnej dokumentacji Azure Databricks.
+# =============================================================================
+bundle:
+  name: radplume
+
+include:
+  - resources/*.yml
+
+artifacts:
+  radplume_wheel:
+    type: whl
+    path: .
+    build: python -m pip wheel --no-deps -w dist .
+
+variables:
+  env:
+    description: "Plik konfiguracji radplume (dev | prod)"
+    default: dev
+
+targets:
+  dev:
+    mode: development
+    default: true
+    workspace:
+      host: https://adb-XXXXXXXXXXXXXXX.X.azuredatabricks.net   # TODO: workspace DEV
+    variables:
+      env: dev
+
+  prod:
+    # mode: production — bundle blokuje deploy z lokalnej maszyny z niezatwierdzonymi
+    # zmianami i wymaga jawnych uprawnień; do PROD wdraża WYŁĄCZNIE CI (plan 4.1).
+    mode: production
+    workspace:
+      host: https://adb-YYYYYYYYYYYYYYY.Y.azuredatabricks.net   # TODO: workspace PROD
+    variables:
+      env: prod

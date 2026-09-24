@@ -1,0 +1,77 @@
+# =============================================================================
+# Parametry fizyczne modelu gaussowskiego (plan 3.3 etap 5, 4.3).
+#
+# Model: stacjonarna smuga gaussowska z odbiciem od gruntu, liczona osobno dla
+# każdej godziny uwolnienia (segmentacja godzinowa), dyspersja wg Briggsa
+# (teren wiejski), klasy stabilności Pasquilla, depozycja sucha + mokra,
+# rozpad promieniotwórczy w czasie transportu.
+#
+# Świadomie PROSTY model — rubryka kursu punktuje testy i jakość danych,
+# nie wyrafinowanie fizyki (plan Część VI, „Uwaga do fizyki”).
+# =============================================================================
+physics:
+  nuclides:
+    Cs-137:
+      half_life_s: 9.49e+8            # 30,08 roku — w skali godzin praktycznie brak rozpadu
+      dry_deposition_velocity_ms: 0.001   # aerozol ~1 µm
+      washout_a: 8.0e-5              # Λ = a · P^b  [1/s], P w mm/h
+      washout_b: 0.8
+      # Moc dawki od depozytu na gruncie (ground shine, 1 m nad ziemią):
+      # ~2,0e-3 µSv/h na 1 kBq/m² (Cs-137 + Ba-137m, rząd wielkości wg FGR-12).
+      groundshine_usv_h_per_kbq_m2: 2.0e-3
+    I-131:
+      half_life_s: 6.93e+5            # 8,02 dnia — rozpad ma znaczenie przy dłuższym transporcie
+      dry_deposition_velocity_ms: 0.005   # mieszanina form gazowych i aerozolu — szybciej niż Cs
+      washout_a: 8.0e-5
+      washout_b: 0.8
+      groundshine_usv_h_per_kbq_m2: 1.3e-3
+
+  # Wykładnik profilu potęgowego wiatru u(z) = u10 · (z/10)^p, teren wiejski.
+  # Stabilna atmosfera (E, F) = silniejszy wzrost wiatru z wysokością.
+  wind_profile_exponent: {A: 0.07, B: 0.07, C: 0.10, D: 0.15, E: 0.35, F: 0.55}
+
+  # Model transportu (plan rozszerzeń, etap 3):
+  #   puff     — obłok z każdej godziny uwolnienia przesuwany co `step_minutes` wiatrem
+  #              z danej godziny; chmura skręca razem z wiatrem (domyślny),
+  #   straight — każda godzina uwolnienia to prosta smuga z wiatrem tej godziny
+  #              (stary model, zostawiony do porównań w write-upie).
+  transport:
+    model: puff
+    step_minutes: 15
+    # Jak długo śledzimy obłok po uwolnieniu. Przy 2 m/s to ~130 km, czyli więcej niż
+    # domena ±100 km; szybciej wiejący wiatr wynosi obłok poza domenę wcześniej.
+    horizon_hours: 18
+
+  # Zaburzenia pogody w trybie zdarzenia (radplume event). Stałe dla członka zespołu:
+  # odpowiadają systematycznemu błędowi reanalizy/prognozy dla danego dnia.
+  event_perturbation:
+    wind_dir_sigma_deg: 15        # odchylenie standardowe kierunku wiatru
+    wind_speed_sigma: 0.2         # lognormal σ mnożnika prędkości (~±20%)
+    source_gsd: 2.0               # niepewność ilości podanej przez użytkownika (×/÷ 2)
+
+  # Wiatr < 0,5 m/s: wzór gaussowski dzieli przez u i „wybucha”.
+  # Cisza wiatrowa to znane ograniczenie modelu — obcinamy od dołu.
+  min_wind_speed_ms: 0.5
+
+  # Poniżej 100 m od źródła wzór gaussowski nie ma sensu (bliskie pole, budynki).
+  # Komórka ze źródłem dostaje 0 — opisane w ograniczeniach.
+  min_downwind_distance_m: 100.0
+
+  # Przycinanie wierszy: poza ±4σy od osi smugi stężenie < 0,04% osi.
+  # Wycinamy te wiersze PRZED agregacją — to główna oszczędność przy skalowaniu.
+  crosswind_cutoff_sigmas: 4.0
+
+  # Moment „dotarcia smugi”: pierwsza godzina, w której depozycja (przy medianie Q)
+  # przekracza ten próg. 1 kBq/m² ≈ poziom wyraźnie odróżnialny od tła.
+  arrival_threshold_bq_m2: 1000.0
+
+  # Tło promieniowania naturalnego (moc dawki), używane przez symulator czujników.
+  background_usv_h: 0.05
+
+  # Rozkłady wariantów fizycznych (niepewność parametryczna, plan 3.4).
+  # Wariant 0 jest zawsze „centralny” (shift 0, mnożniki 1) — służy do demo.
+  variants:
+    stability_shift_choices: [-1, 0, 1]      # przesunięcie klasy Pasquilla o jedną w górę/dół
+    stability_shift_weights: [0.25, 0.5, 0.25]
+    deposition_multiplier_sigma: 0.5         # lognormal(0, σ) na v_d
+    washout_multiplier_sigma: 0.5            # lognormal(0, σ) na Λ

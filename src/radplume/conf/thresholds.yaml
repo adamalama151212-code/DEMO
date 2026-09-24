@@ -1,0 +1,35 @@
+# =============================================================================
+# Definicja „skażenia” (plan 3.4a, P15).
+#
+# Odpowiedź platformy nigdy nie brzmi „tak/nie”, tylko:
+#   „w N% scenariuszy pogodowych przekroczono próg T”.
+#
+# Wszystkie progi są przeliczane na depozycję [kBq/m²], żeby agregacja
+# w gold była jednym, prostym porównaniem. Progi dawkowe (mSv/rok) przeliczamy
+# przez współczynnik ground shine z physics.yaml, konserwatywnie:
+# bez wymywania z gleby i bez rozpadu w ciągu roku.
+# =============================================================================
+thresholds:
+  cs137_contaminated:
+    nuclide: Cs-137
+    metric: deposition_kbq_m2
+    value: 37
+    label: "teren skażony (definicja po Czarnobylu, IAEA)"
+  cs137_strict_control:
+    nuclide: Cs-137
+    metric: deposition_kbq_m2
+    value: 555
+    label: "strefa ścisłej kontroli (po Czarnobylu)"
+  cs137_public_limit:
+    nuclide: Cs-137
+    metric: annual_dose_msv
+    value: 1
+    label: "dawka graniczna dla ludności 1 mSv/rok (tylko ground shine Cs-137)"
+  cs137_evacuation:
+    nuclide: Cs-137
+    metric: annual_dose_msv
+    value: 20
+    label: "próg ewakuacji stosowany po Fukushimie 20 mSv/rok (tylko ground shine Cs-137)"
+
+# Miasta brane do gold_city_exposure: dalej niż ~100 km model gaussowski traci sens.
+city_radius_km: 100

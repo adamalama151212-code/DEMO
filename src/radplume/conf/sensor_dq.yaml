@@ -1,0 +1,54 @@
+# =============================================================================
+# Progi jakości danych z czujników (plan 3.5.2).
+# Te same wartości czyta symulator (żeby wiedzieć, co jest anomalią)
+# i pipeline czyszczący (żeby ją wykryć) — jedno źródło prawdy.
+# =============================================================================
+sensor_dq:
+  late_arrival:
+    # Reguła biznesowa: lag = sent_at - event_time. Powyżej progu rekord trafia
+    # do ops.sensor_late_rejected — świadomie odseparowany, nie zgubiony.
+    max_lag_minutes: 15
+  dedup:
+    # Watermark TYLKO ogranicza stan deduplikacji (plan P1). Ma tę samą wartość
+    # co reguła biznesowa, więc sam niczego nie powinien odrzucać.
+    watermark_minutes: 15
+    keys: [device_id, event_time]
+
+  wind_speed_ms:
+    hard_min: 0
+    hard_max: 45                 # powyżej = fizycznie niemożliwe na anemometrze -> drop
+    max_delta_per_reading: 25    # skok między kolejnymi odczytami -> kwarantanna
+  dose_rate_usv_h:
+    hard_min: 0
+    hard_max: 1000               # zakres detektora
+
+  drift_detection:
+    # Reszta r = ln(dose / (tło + mediana_modelu)); bez dryfu E[r] ≈ 0 (plan P18).
+    window_minutes: 30
+    residual_mean_threshold: 0.2 # błąd średniej z 30 odczytów ≈ 0,35/√30 ≈ 0,064 → ~3σ
+    neighbor_radius_km: 5        # podwyższona reszta u sąsiadów = realny sygnał, nie dryf
+    warmup_minutes: 10
+
+  frozen_reading:
+    repeat_count_threshold: 10
+
+  # Szum pomiaru użyty przez symulator i do pasma operacyjnego alertów.
+  measurement_sigma: 0.35        # lognormal σ odczytu w smudze
+  background_sigma: 0.15         # lognormal σ tła (P17 — bez niego tło byłoby stałą)
+
+  # Pasmo P5–P95 z definicji zostawia ~10% odczytów poza sobą. Alert uznajemy
+  # za istotny, gdy w danej godzinie poza pasmem jest co najmniej taki odsetek odczytów.
+  alert_min_fraction: 0.25
+
+# Scenariusz demo ścieżki czujników (plan 3.5.3 „Scenariusz demo”, Część X).
+# Czujniki „mierzą” smugę z konkretnego epizodu: domyślnie prawdziwa pogoda
+# Fukushimy z marca 2011 (epizod walidacyjny), wariant centralny, mediana Q.
+demo:
+  site_id: fukushima_daiichi
+  scenario_set: validation_2011
+  episode_id: 0
+  variant_id: 0
+  # start symulacji czujników = start epizodu + tyle godzin (smuga zdąży dolecieć)
+  sim_start_offset_h: 6
+  n_plume_devices: 6
+  n_background_devices: 4

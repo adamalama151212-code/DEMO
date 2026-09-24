@@ -1,0 +1,69 @@
+# =============================================================================
+# radplume — platforma do modelowania dyspersji radionuklidów
+#
+# Dlaczego pyproject.toml (a nie requirements.txt):
+#   - jeden plik opisuje zależności, narzędzia (ruff, pytest) i punkt wejścia CLI,
+#   - z tego samego pliku budujemy wheel, który na Databricks instalujemy
+#     w Jobie (python_wheel_task) — lokalnie i w chmurze działa TEN SAM pakiet.
+# =============================================================================
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "radplume"
+version = "0.1.0"
+description = "Modelowanie dyspersji radionuklidów: medalion Spark/Delta, lokalnie i na Databricks"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    # PySpark 4.0 = ta sama główna wersja Sparka co Databricks Runtime 17.x.
+    # Trzymamy się jednej wersji głównej, żeby lokalne zachowanie (np. ANSI SQL
+    # domyślnie włączone w Spark 4) było takie samo jak w chmurze.
+    # Na Databricks pyspark jest już w runtime — pip go nie nadpisze, bo wersja się zgadza.
+    "pyspark>=4.0,<4.1",
+    # delta-spark 4.0.x jest parowane z Spark 4.0.x (macierz zgodności Delta).
+    # Lokalnie daje nam Delta Lake (MERGE, time travel, replaceWhere) jak w chmurze.
+    "delta-spark>=4.0,<4.1",
+    "pyyaml>=6.0",
+    "requests>=2.31",
+    # sqlglot: parser SQL do guardrails aplikacji AI (whitelista tabel, tylko SELECT).
+    # Parser zamiast regexów, bo regexy łatwo obejść (komentarze, CTE, podzapytania).
+    "sqlglot>=25",
+    # Baza stref czasowych dla zoneinfo (radplume event --timezone Europe/Warsaw).
+    # Obrazy Docker „slim” i Windows nie zawsze mają systemową bazę stref.
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "ruff>=0.5",
+]
+
+[project.scripts]
+# Po `pip install -e .` w terminalu dostępna jest komenda `radplume`.
+# Na Databricks ten sam entry point wywołuje python_wheel_task.
+radplume = "radplume.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+# Konfiguracja YAML jedzie w paczce (wheel) — dzięki temu Job na Databricks
+# ma dokładnie te same progi i parametry fizyczne co lokalny przebieg.
+radplume = ["conf/*.yaml", "conf/*.csv"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# E/F = błędy i nieużywane importy, I = sortowanie importów, B = typowe pułapki,
+# UP = nowoczesna składnia. Świadomie bez reguł stylistycznych, które tylko hałasują.
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]  # długość linii pilnuje formatter; długie komentarze PL są OK

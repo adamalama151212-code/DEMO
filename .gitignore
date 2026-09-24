@@ -1,0 +1,24 @@
+# Dane lokalne (landing, tabele Delta, checkpointy) — generowane, nie wersjonowane
+data/
+spark-warehouse/
+metastore_db/
+derby.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+
+# Databricks Asset Bundles (lokalny stan deployu)
+.databricks/
+
+# IDE
+.idea/
+.vscode/
+data-offline/
