@@ -72,6 +72,8 @@ rejestr urządzeń (INSERT/UPDATE/DELETE) ─► bronze.device_cdc ─► silver
 Kod ma **dużo komentarzy** wyjaśniających, *dlaczego* wybrano dane rozwiązanie,
 a nie inne. Warto czytać go razem z planem.
 
+**Jak to jest zbudowane i dlaczego:** [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
 **Jakie dane musisz przygotować sam i gdzie je wrzucić:**
 [`docs/przygotowanie-danych.md`](docs/przygotowanie-danych.md). Do podstawowego
 przebiegu nie trzeba niczego; ręcznie pobierasz tylko dane do walidacji modelu.
@@ -96,7 +98,7 @@ przebiegu nie trzeba niczego; ręcznie pobierasz tylko dane do walidacji modelu.
 │   ├── unit/          # szybkie testy pojedynczych funkcji (fizyka, meteo, DQ, CDC, guardrails)
 │   └── integration/   # potok end-to-end w małej skali (idempotencja, spójność wyników)
 ├── resources/         # zasoby Databricks Asset Bundle (Joby) — szkielet
-├── docs/              # dokumentacja: przygotowanie danych
+├── docs/              # dokumentacja: architektura, przygotowanie danych
 ├── data/              # (git-ignored) landing, tabele Delta, checkpointy — tworzone przy uruchomieniu
 ├── databricks.yml     # definicja bundla (targety dev/prod)
 ├── Dockerfile, docker-compose.yml
