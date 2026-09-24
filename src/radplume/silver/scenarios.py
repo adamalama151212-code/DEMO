@@ -127,10 +127,10 @@ def physical_variants(n: int, heights: list[float], cfg_variants: dict, rng: ran
     Wariant 0 = centralny (bez przesunięć) — używany w demo i jako „najlepsze oszacowanie”.
     Pogody tu nie zaburzamy: w klimatologii niepewność pogody pokrywają RÓŻNE dni.
     """
-    out = [_variant(0, 0, 1.0, 1.0, float(heights[1]))]
+    out = [make_variant(0, 0, 1.0, 1.0, float(heights[1]))]
     for i in range(1, n):
         out.append(
-            _variant(
+            make_variant(
                 i,
                 rng.choices(cfg_variants["stability_shift_choices"], weights=cfg_variants["stability_shift_weights"])[0],
                 rng.lognormvariate(0, cfg_variants["deposition_multiplier_sigma"]),
@@ -141,7 +141,7 @@ def physical_variants(n: int, heights: list[float], cfg_variants: dict, rng: ran
     return out
 
 
-def _variant(i, shift, vd, washout, height, dir_offset=0.0, speed_mult=1.0) -> dict:
+def make_variant(i, shift, vd, washout, height, dir_offset=0.0, speed_mult=1.0) -> dict:
     return {
         "variant_id": i, "stability_shift": shift, "vd_mult": vd, "washout_mult": washout,
         "release_height_m": height, "wind_dir_offset_deg": dir_offset, "wind_speed_mult": speed_mult,

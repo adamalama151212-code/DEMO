@@ -8,6 +8,7 @@ Przykłady:
     radplume run-all --offline          # całość bez internetu (dane syntetyczne)
     radplume run-batch                  # ścieżka batch na prawdziwych danych
     radplume ask --site lubiatowo_kopalino --city Lębork
+    radplume event --site lubiatowo_kopalino --date 2020-01-15 --release 13:00=1e15 --release 16:00=5e15
 """
 
 from __future__ import annotations
@@ -63,6 +64,26 @@ def main(argv: list[str] | None = None) -> int:
     ask.add_argument("--city", required=True, help="nazwa miasta (z polskimi znakami lub bez)")
     ask.add_argument("--scenario-set", default="climatology")
 
+    ev = sub.add_parser(
+        "event",
+        help="konkretne zdarzenie: znane godziny i ilości uwolnienia, pogoda danego dnia zaburzona (zespół)",
+        description=(
+            "Przykład: radplume event --site lubiatowo_kopalino --date 2020-01-15 "
+            "--release 13:00=1e15 --release 16:00-18:00=5e15 --timezone Europe/Warsaw"
+        ),
+    )
+    ev.add_argument("--site", required=True)
+    ev.add_argument("--date", required=True, help="dzień zdarzenia, RRRR-MM-DD")
+    ev.add_argument(
+        "--release", action="append", required=True,
+        help="HH:MM=Bq (godzina od HH:MM) albo HH:MM-HH:MM=Bq; ilość Cs-137; można podać wiele razy",
+    )
+    ev.add_argument("--timezone", default="UTC", help="strefa godzin z --release, np. Europe/Warsaw (domyślnie UTC)")
+    ev.add_argument("--name", default=None, help="nazwa zdarzenia (domyślnie z daty i godziny)")
+    ev.add_argument("--members", type=int, default=None, help="liczba członków zespołu (domyślnie z configu)")
+
+    sub.add_parser("list-events", help="zapisane zdarzenia (zestawy scenariuszy event_…)")
+
     cities = sub.add_parser("list-cities", help="miasta w zasięgu danej lokalizacji")
     cities.add_argument("--site", required=True)
 
@@ -79,6 +100,17 @@ def main(argv: list[str] | None = None) -> int:
     # py4j loguje każde wywołanie JVM na poziomie INFO — wyciszamy.
     logging.getLogger("py4j").setLevel(logging.WARNING)
 
+    spec = None
+    if args.command == "event":
+        # Parsowanie PRZED startem Sparka: literówka w --release kończy się od razu czytelnym błędem.
+        import datetime as dt
+
+        from radplume.silver.events import EventSpec, event_name, parse_release
+
+        date = dt.date.fromisoformat(args.date)
+        releases = [parse_release(r, date, args.timezone) for r in args.release]
+        spec = EventSpec(event_name(date, releases, args.name), args.site, releases)
+
     ctx = _context(args)
     from radplume.pipelines.stream import STREAM_ORDER
 
@@ -94,6 +126,19 @@ def main(argv: list[str] | None = None) -> int:
         from radplume.app.city_query import answer_city_question
 
         print(answer_city_question(ctx, args.site, args.city, args.scenario_set))
+    elif args.command == "event":
+        from radplume.pipelines.event import event_summary, run_event
+
+        run_event(ctx, spec, args.members or ctx.run["event"]["n_members"])
+        print(event_summary(ctx, spec))
+    elif args.command == "list-events":
+        (
+            ctx.storage.read("silver", "source_terms")
+            .where("scenario_set LIKE 'event_%'")
+            .select("scenario_set", "site_id", "nuclide", "median_bq")
+            .orderBy("scenario_set", "nuclide")
+            .show(100, truncate=False)
+        )
     elif args.command == "list-cities":
         from radplume.app.city_query import list_cities
 

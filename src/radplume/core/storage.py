@@ -138,6 +138,15 @@ class Storage:
         self._check_layer(layer)
         writer = self._writer(df, "overwrite", partition_by)
         if replace_where and self.exists(layer, name):
+            new_cols = set(df.columns) - set(self.read(layer, name).columns)
+            if new_cols:
+                # Migracja schematu (np. dane z poprzedniej wersji bez kolumny scenario_set):
+                # warunek replaceWhere na starych wierszach dałby NULL i zostawiłby je w tabeli.
+                # Bezpieczniej przeliczyć całą tabelę od nowa.
+                log.warning("%s.%s: nowe kolumny %s — nadpisuję całą tabelę (migracja schematu)",
+                            layer, name, sorted(new_cols))
+                replace_where = None
+        if replace_where and self.exists(layer, name):
             # mergeSchema: nowa kolumna w danych (np. po rozszerzeniu schematu) zostanie
             # dopisana do tabeli zamiast przerwać zapis.
             writer = writer.option("replaceWhere", replace_where).option("mergeSchema", "true")

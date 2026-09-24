@@ -40,14 +40,14 @@ Obecny model ma trzy słabości, które wyszły w dyskusji:
 - ✅ gold łączy próbki Q po `scenario_set`
 - ✅ testy: rozkład przedziałów na godziny, suma ułamków = 1, brak pliku → równomierny
 
-### Etap 2: Tryb zdarzenia ⬜
-- ⬜ `radplume event --site … --date … --release 13:00=1e15 --release 16:00-18:00=5e15 [--timezone Europe/Warsaw] [--name …]`
-- ⬜ zespół członków: offset kierunku ~ N(0, 15°), mnożnik prędkości ~ lognormal(0, 0,2), przesunięcie stabilności, v_d, Λ, wysokość; członek 0 = niezaburzony
-- ⬜ kolumny `wind_dir_offset_deg`, `wind_speed_mult` w `silver.scenarios` (dla klimatologii 0 / 1)
-- ⬜ automatyczne pobranie meteo dla dnia zdarzenia, jeśli go brak
-- ⬜ zapis tylko wycinka `scenario_set = event_…` (nie niszczy klimatologii)
-- ⬜ podsumowanie w terminalu: miasta z największym prawdopodobieństwem, czas dotarcia; `ask --scenario-set event_…`
-- ⬜ testy: parsowanie wycieków i strefy czasowej, determinizm członków, przebieg end-to-end
+### Etap 2: Tryb zdarzenia ✅
+- ✅ `radplume event --site … --date … --release 13:00=1e15 --release 16:00-18:00=5e15 [--timezone Europe/Warsaw] [--name …]`
+- ✅ zespół członków: offset kierunku ~ N(0, 15°), mnożnik prędkości ~ lognormal(0, 0,2), przesunięcie stabilności, v_d, Λ, wysokość; członek 0 = niezaburzony
+- ✅ kolumny `wind_dir_offset_deg`, `wind_speed_mult` w `silver.scenarios` (dla klimatologii 0 / 1)
+- ✅ automatyczne pobranie meteo dla dnia zdarzenia, jeśli go brak
+- ✅ zapis tylko wycinka `scenario_set = event_…` (nie niszczy klimatologii)
+- ✅ podsumowanie w terminalu: miasta z największym prawdopodobieństwem, czas dotarcia; `ask --scenario-set event_…`
+- ✅ testy: parsowanie wycieków i strefy czasowej, determinizm członków, przebieg end-to-end
 
 ### Etap 3: Model obłoków (trajektorie) ⬜
 - ⬜ trajektoria obłoku: kroki 15 min, wiatr z danej godziny (z zaburzeniem członka), suma narastająca położenia

@@ -202,16 +202,19 @@ def meteo_requests(cfg: dict) -> list[tuple[str, str, str]]:
     return out
 
 
-def ingest_meteo(cfg: dict, landing_dir: str) -> list[str]:
+def ingest_meteo(cfg: dict, landing_dir: str, requests_list: list[tuple[str, str, str]] | None = None) -> list[str]:
     """Pobiera brakujące pliki do ``<landing>/meteo/<site_id>/<start>_<end>.json``.
 
     Idempotentne: istniejący plik jest pomijany (nie odpytujemy API ponownie
     i nie tworzymy duplikatów). Chcesz pobrać od nowa → usuń plik.
+    ``requests_list`` pozwala pobrać konkretny zakres (np. dzień zdarzenia);
+    domyślnie: klimatologia + epizody walidacyjne z konfiguracji. Nakładające się
+    zakresy nie szkodzą — bronze scala godziny MERGE-em po (site_id, time_utc).
     """
     source = cfg["sources"]["meteo"]
     seed = cfg["run"]["seed"]
     written = []
-    for site_id, start, end in meteo_requests(cfg):
+    for site_id, start, end in requests_list if requests_list is not None else meteo_requests(cfg):
         site = cfg["sites"][site_id]
         out = Path(landing_dir) / "meteo" / site_id / f"{start}_{end}.json"
         if out.exists():

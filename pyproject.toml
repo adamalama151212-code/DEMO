@@ -30,6 +30,9 @@ dependencies = [
     # sqlglot: parser SQL do guardrails aplikacji AI (whitelista tabel, tylko SELECT).
     # Parser zamiast regexów, bo regexy łatwo obejść (komentarze, CTE, podzapytania).
     "sqlglot>=25",
+    # Baza stref czasowych dla zoneinfo (radplume event --timezone Europe/Warsaw).
+    # Obrazy Docker „slim” i Windows nie zawsze mają systemową bazę stref.
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]

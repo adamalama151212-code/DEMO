@@ -47,6 +47,11 @@ run:
   # tylko mnożnik nakładany przy agregacji (plan 3.4, P20).
   n_source_samples: 30
 
+  event:
+    # Członkowie zespołu w trybie zdarzenia (radplume event): każdy to pogoda dnia
+    # zdarzenia zaburzona o małe wartości + wariant parametrów fizycznych.
+    n_members: 30
+
 sources:
   # open_meteo = prawdziwe dane ERA5 (wymaga internetu)
   # synthetic  = deterministyczny generator (tryb --offline, testy, CI)

@@ -23,6 +23,11 @@ run:
   n_param_scenarios: 3
   n_source_samples: 50
 
+  event:
+    # Członkowie zespołu w trybie zdarzenia (radplume event): każdy to pogoda dnia
+    # zdarzenia zaburzona o małe wartości + wariant parametrów fizycznych.
+    n_members: 50
+
 sources:
   meteo: open_meteo
   cities: geonames

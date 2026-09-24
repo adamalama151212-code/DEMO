@@ -47,11 +47,28 @@ def step_ingest_cities(ctx: Context) -> None:
 
 
 # ----------------------------------------------------------------------------- bronze
+def refresh_bronze_meteo(ctx: Context) -> None:
+    """landing/meteo → bronze.meteo. MERGE po (site_id, time_utc): ponowne wczytanie
+    tych samych plików (albo nakładających się zakresów) nie dubluje godzin."""
+    meteo = read_landing_meteo(ctx.spark, ctx.storage.landing("meteo"))
+    ctx.storage.merge(meteo, "bronze", "meteo", BRONZE_METEO_KEYS)
+
+
+def refresh_silver_meteo(ctx: Context, site_ids: list[str]) -> None:
+    """bronze.meteo → silver.meteo (kontrola jakości, klasa Pasquilla) dla wskazanych lokalizacji."""
+    st = ctx.storage
+    meteo, metrics = build_silver_meteo(st.read("bronze", "meteo").where(F.col("site_id").isin(site_ids)))
+    st.merge(meteo, "silver", "meteo", ["site_id", "time_utc"])
+    log_metrics(st, "silver_meteo", metrics)
+    if metrics["rows_grid_elevation_le_0"]:
+        # P21: lokalizacja lądowa z wysokością ≤ 0 = podejrzane współrzędne (linia brzegowa).
+        # Ostrzeżenie (expect), nie odrzucenie — dane pogodowe są poprawne.
+        log.warning("silver_meteo: %d godzin z grid_elevation ≤ 0 — sprawdź współrzędne lokalizacji", metrics["rows_grid_elevation_le_0"])
+
+
 def step_bronze(ctx: Context) -> None:
     st = ctx.storage
-    meteo = read_landing_meteo(ctx.spark, st.landing("meteo"))
-    # MERGE po (site_id, time_utc): ponowne wczytanie tych samych plików nie dubluje godzin.
-    st.merge(meteo, "bronze", "meteo", BRONZE_METEO_KEYS)
+    refresh_bronze_meteo(ctx)
 
     city_files = glob.glob(st.landing("cities", "cities5000.txt")) if ctx.cfg["sources"]["cities"] == "geonames" \
         else glob.glob(st.landing("cities", "cities_fallback.csv"))
@@ -71,13 +88,7 @@ def step_silver_base(ctx: Context) -> None:
     st, cfg, run = ctx.storage, ctx.cfg, ctx.run
     sites = sites_df(ctx.spark, active_sites(cfg))
 
-    meteo, metrics = build_silver_meteo(st.read("bronze", "meteo").where(F.col("site_id").isin(run["sites"])))
-    st.merge(meteo, "silver", "meteo", ["site_id", "time_utc"])
-    log_metrics(st, "silver_meteo", metrics)
-    if metrics["rows_grid_elevation_le_0"]:
-        # P21: lokalizacja lądowa z wysokością ≤ 0 = podejrzane współrzędne (linia brzegowa).
-        # Ostrzeżenie (expect), nie odrzucenie — dane pogodowe są poprawne.
-        log.warning("silver_meteo: %d godzin z grid_elevation ≤ 0 — sprawdź współrzędne lokalizacji", metrics["rows_grid_elevation_le_0"])
+    refresh_silver_meteo(ctx, run["sites"])
 
     grid = build_grid(sites, run["grid_size"], run["cell_km"])
     st.overwrite(grid, "silver", "grid")
