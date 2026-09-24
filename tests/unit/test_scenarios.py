@@ -87,3 +87,24 @@ def test_q_samples_are_per_set_and_deterministic():
     event = sorted(q for s, _, _, _, q in a.q_samples if s == "event_x")
     # mediany próbek odpowiadają medianom zestawów (różnica 100×)
     assert clim[25] / event[25] == pytest.approx(100, rel=0.5)
+
+
+def test_source_term_file_is_read_in_utc(spark, tmp_path):
+    """Plik z przebiegiem uwolnienia (format z przygotowanie-danych.md, pkt E) → wiersze dla silver."""
+    from radplume.bronze.source_term import read_source_term
+
+    (tmp_path / "_zrodlo").mkdir()
+    (tmp_path / "_zrodlo" / "oryginal.csv").write_text("to nie jest czytane\n")
+    (tmp_path / "katata.csv").write_text(
+        "site_id,nuclide,time_start_utc,time_end_utc,release_rate_bq_h,release_height_m,source\n"
+        "fukushima_daiichi,Cs-137,2011-03-12T06:00:00,2011-03-12T07:30:00,2.0e+13,,test\n"
+    )
+    rows = [r.asDict() for r in read_source_term(spark, str(tmp_path)).collect()]
+    assert len(rows) == 1  # oryginał w _zrodlo/ pominięty
+    r = rows[0]
+    assert r["time_start_utc"] == dt.datetime(2011, 3, 12, 6, 0)  # proces w UTC
+    sched, total, _ = schedule_from_intervals(
+        [(r["time_start_utc"], r["time_end_utc"], r["release_rate_bq_h"])], T0, 4
+    )
+    assert total == pytest.approx(3e13)
+    assert dict(sched) == pytest.approx({0: 2 / 3, 1: 1 / 3})

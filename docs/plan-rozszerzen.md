@@ -58,10 +58,18 @@ Obecny model ma trzy słabości, które wyszły w dyskusji:
 - ✅ testy: dokładność Φ, zgodność ze starym modelem przy stałym wietrze, skręcająca chmura dociera tam, gdzie prosta smuga nie
 - ✅ pomiar czasu przebiegu lokalnie: `--offline run-all` 2 min 8 s (dyspersja ~50 s zamiast ~11 s), `event` ~46 s
 
-### Etap 4: Dokumentacja i weryfikacja ⬜
-- ⬜ README (komenda `event`, model obłoków)
-- ⬜ ARCHITECTURE.md (model, wymiary MC, tabele, decyzje)
-- ⬜ HOWTOREAD.md (nowe pliki i tabele, liczby wierszy)
-- ⬜ przygotowanie-danych.md (pkt E: obsługiwane)
-- ⬜ plan_finalny_radplume.md (rejestr poprawek P22–P24)
-- ⬜ pełne testy, ruff, przebieg offline `run-all` + `event`, push
+### Etap 4: Dokumentacja i weryfikacja ✅
+- ✅ README (komenda `event`, model obłoków)
+- ✅ ARCHITECTURE.md (model, wymiary MC, tabele, decyzje)
+- ✅ HOWTOREAD.md (nowe pliki i tabele, liczby wierszy)
+- ✅ przygotowanie-danych.md (pkt E: obsługiwane)
+- ✅ plan_finalny_radplume.md (rejestr poprawek P22–P24)
+- ✅ pełne testy (90), ruff, przebieg offline `run-all` + `event` + `ask --scenario-set event_…` od czystego katalogu, push
+
+## Wynik
+
+Wszystkie etapy zakończone. Co zostaje poza zakresem tego planu (patrz `ARCHITECTURE.md`, sekcja 15):
+- dostarczenie prawdziwych danych walidacyjnych (Katata 2015, JAEA) i pierwsza walidacja,
+- walidacja godzinowych stężeń w powietrzu (stacje SPM, Oura 2015),
+- wiatr zmienny także w przestrzeni (obecnie jednorodny w domenie, zmienny w czasie),
+- zubożenie chmury przez depozycję (obecnie pomijane, konserwatywnie).

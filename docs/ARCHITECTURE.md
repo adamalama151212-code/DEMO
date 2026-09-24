@@ -40,6 +40,14 @@ Nie wiadomo, *kiedy* doszłoby do awarii ani *ile* by się uwolniło. Odpowiedź
 **rozkładem po scenariuszach** (Monte Carlo), a nie jedną mapą: „w N% scenariuszy
 przekroczono próg T”.
 
+Platforma odpowiada na dwa rodzaje pytań, liczone tym samym modelem:
+
+| Pytanie | Zestaw scenariuszy | Co losuje Monte Carlo |
+|---|---|---|
+| „Nie wiadomo kiedy: jaka jest szansa, że miasto Y zostanie skażone?” (analiza ryzyka lokalizacji) | `climatology` | **różne dni** z wieloletniej pogody + parametry fizyczne + ilość |
+| „Znam dzień, godziny i ilości: gdzie pójdzie chmura?” (konkretne zdarzenie) | `event_…` | **zaburzenia pogody tego dnia** (kierunek, prędkość) + parametry + ilość |
+| „Czy model odtwarza prawdziwą awarię?” (walidacja) | `validation_2011` | parametry + ilość; pogoda i przebieg uwolnienia prawdziwe |
+
 | W zakresie | Poza zakresem |
 |---|---|
 | uwolnienie do atmosfery (awaria reaktora, pożar składowiska) | skażenie wód gruntowych i powierzchniowych |
@@ -66,7 +74,9 @@ flowchart LR
         BM[bronze.meteo] --> SM[silver.meteo]
         BC[bronze.cities] --> CC[silver.city_cells]
         SM --> DISP[silver.dispersion_episode]
-        SC[silver.scenarios<br/>silver.q_samples] --> DISP
+        SC[silver.scenarios<br/>source_terms<br/>release_schedule<br/>q_samples] --> DISP
+        EV[radplume event<br/>zespół członków] --> SC
+        ST[bronze.source_term<br/>przebieg uwolnienia] --> SC
         G[silver.grid] --> DISP
         DISP --> RM[gold.risk_map]
         DISP --> CE[gold.city_exposure]
@@ -143,9 +153,12 @@ Fizyczne rozmieszczenie:
 | `ingest-meteo` | Open-Meteo API | `landing/meteo/<site>/<rok>.json` | plik tylko wtedy, gdy nie istnieje (cache) | — |
 | `ingest-cities` | GeoNames | `landing/cities/` | jw. | — |
 | `bronze` | landing | `bronze.meteo`, `bronze.cities` | **MERGE** / overwrite | `(site_id, time_utc)` |
+| `bronze` | landing/source_term (opcjonalnie) | `bronze.source_term` | overwrite | — |
 | `silver` | bronze | `silver.meteo` | **MERGE** | `(site_id, time_utc)` |
-| | | `silver.grid`, `city_cells`, `scenarios`, `q_samples` | overwrite (małe, deterministyczne) | — |
-| `dispersion` | silver | `silver.dispersion_episode` | overwrite z **replaceWhere** `site_id = …` | partycja `site_id` |
+| | | `silver.grid`, `city_cells` | overwrite (małe, deterministyczne) | — |
+| | | `silver.scenarios`, `source_terms`, `release_schedule`, `q_samples` | **replaceWhere** `scenario_set NOT LIKE 'event_%'` | — |
+| `dispersion` | silver | `silver.dispersion_episode` | **replaceWhere** `site_id = … AND scenario_set NOT LIKE 'event_%'` | partycja `site_id` |
+| `event` | silver + parametry CLI | cztery tabele scenariuszy i `dispersion_episode` | **replaceWhere** `scenario_set = 'event_…'`; potem cały krok `gold` | — |
 | `gold` | silver | `gold.risk_map`, `city_exposure`, `site_ranking` | overwrite | partycja `site_id` (risk_map) |
 | `validation` | gold + CSV pomiarów | `gold.validation_points`, `gold.validation` | overwrite | — |
 | `expected-dose` | silver (jeden scenariusz demo) | `gold.expected_dose` | overwrite | — |
@@ -153,22 +166,53 @@ Fizyczne rozmieszczenie:
 **MERGE** stosujemy tam, gdzie dane przychodzą przyrostowo (nowe lata pogody).
 **replaceWhere** tam, gdzie przeliczamy cały wycinek od nowa: jest tak samo idempotentne,
 a dużo tańsze niż MERGE na milionach wierszy, bo nie robi joinu ze starą wersją.
+Wycinki są rozłączne: `run-batch` nie kasuje zdarzeń, a `event` nie kasuje klimatologii
+ani innych zdarzeń.
 
-### 4.2 Model fizyczny (`silver/dispersion.py`)
+### 4.2 Model fizyczny (`silver/dispersion.py`, `silver/puff.py`)
 
-Stacjonarna smuga gaussowska liczona **osobno dla każdej godziny uwolnienia** z pogodą
-tej godziny (segmentacja godzinowa):
+Wspólne elementy obu modeli transportu:
 
 | Element | Realizacja |
 |---|---|
-| kierunek | kierunek smugi = kierunek wiatru + 180° (`silver/meteo.py`, test 270° → wschód) |
+| kierunek | kierunek lotu = kierunek wiatru + 180° (`silver/meteo.py`, test 270° → wschód) |
 | stabilność | klasy Pasquilla A–F z wiatru, promieniowania i zachmurzenia (tabela Turnera) |
 | dyspersja | σy, σz wg Briggsa (teren wiejski) |
 | wiatr na wysokości uwolnienia | profil potęgowy `u10·(H/10)^p`, minimum 0,5 m/s |
 | stężenie przy gruncie | wzór gaussowski z odbiciem od gruntu |
 | depozycja sucha | `v_d · ∫χ dt` |
 | depozycja mokra | `Λ · ∫χ dz dt`, `Λ = a·P^b` |
-| rozpad | `exp(-λ · x/u)` |
+| rozpad | `exp(-λ · wiek obłoku)` |
+| przebieg uwolnienia | ułamek całości w godzinie h z `silver.release_schedule` |
+
+**Model `puff` (domyślny, `silver/puff.py`).** Masa uwolniona w godzinie h (ułamek z harmonogramu)
+to jeden obłok startujący w połowie tej godziny:
+
+1. **Trajektoria.** Obłok przesuwa się krokami 15 min. W każdym kroku bierze wiatr z bieżącej
+   godziny, po zaburzeniu członka zespołu. Położenie to suma narastająca przesunięć (funkcja
+   okna), więc trajektoria jest łamaną, która skręca razem z wiatrem. Śledzenie kończy się po
+   `horizon_hours` (18 h) albo przy pierwszej godzinie bez pogody.
+2. **Rozmycie.** σy i σz liczymy wzorami Briggsa od **przebytej drogi**, w punkcie odcinka
+   najbliższym komórce. Rozmycie nie może maleć wzdłuż trajektorii: gdy zmiana klasy stabilności
+   dałaby mniejsze σ, zostaje większe (maksimum narastające).
+3. **Depozycja z odcinka, liczona analitycznie.** Obłok gaussowski przesuwający się ze stałą
+   prędkością wzdłuż odcinka o długości L daje w punkcie dawkę całkowaną po czasie równą
+   **wzorowi smugi × ΔΦ**, gdzie ΔΦ = Φ(a/σy) − Φ((a − L)/σy), a *a* to położenie punktu
+   wzdłuż odcinka. Suma ΔΦ po kolejnych odcinkach daje pełne przejście chmury, więc nie ma
+   „dziur” między pozycjami obłoku. Φ liczymy przybliżeniem erf (Abramowitz & Stegun,
+   błąd < 1,5·10⁻⁷), bo Spark SQL nie ma funkcji erf, a Python UDF jest zakazany w silver.
+4. **Wybór komórek.** Dla każdego odcinka bierzemy tylko komórki z prostokąta ±4σy wokół niego.
+   Indeksy siatki wyliczamy wzorem, bez joinu z całą siatką.
+
+**Własność kontrolna:** przy stałym wietrze `puff` daje ten sam wynik co `straight`. Test
+`test_constant_wind_matches_straight_model` sprawdza to na osi smugi 5–100 km; zmierzona
+różnica jest poniżej 1%. Test `test_turning_wind_…` pokazuje, że przy skręcającym wietrze
+chmura dociera tam, gdzie prosta smuga nie dociera.
+
+**Model `straight` (porównawczy, `hourly_unit_deposition`).** Każda godzina uwolnienia to
+prosta, stacjonarna smuga z wiatrem tej godziny, lecąca przez cały zasięg. Jest 4–5 razy
+tańszy, ale przy zmiennym wietrze myli kierunek dla odległości 50–100 km. Zostaje do porównań
+w write-upie (`physics.transport.model: straight`).
 
 Wszystkie wzory to wyrażenia kolumnowe Sparka (`Column → Column`). Te same funkcje
 sprawdzamy w testach na kilku wierszach (wartości analityczne, bilans masy) i liczymy
@@ -177,19 +221,28 @@ na milionach wierszy w potoku.
 ### 4.3 Wymiary Monte Carlo
 
 ```
-scenariusz = epizod pogodowy × wariant fizyczny × próbka ilości uwolnienia Q
-             (kiedy?)          (jak się rozproszy?)  (ile?)
+scenariusz = epizod × wariant (członek zespołu) × próbka ilości uwolnienia Q
+             (kiedy?)  (jak się rozproszy? jaka pogoda?)  (ile?)
 ```
 
-| Wymiar | Źródło | Kosztuje przeliczenie smugi? |
-|---|---|---|
-| epizod pogodowy | losowy start z wieloletniej historii ERA5 (`climatology`) albo prawdziwe daty (`validation_2011`) | **tak** |
-| wariant fizyczny | przesunięcie klasy stabilności ±1, mnożniki v_d i Λ, wysokość uwolnienia | **tak** |
-| próbka Q | lognormal (mediana, gsd) z `sites.yaml` | **nie**: model jest liniowy względem Q |
+| Wymiar | `climatology` | `validation_2011` | `event_…` | Kosztuje przeliczenie transportu? |
+|---|---|---|---|---|
+| epizod | losowe starty z 10–20 lat ERA5 | prawdziwe daty 2011 | jeden: dzień zdarzenia | **tak** |
+| wariant: fizyka | stabilność ±1, v_d, Λ, wysokość | jw. | jw. | **tak** |
+| wariant: zaburzenie pogody | brak (niepewność pogody pokrywają różne dni) | brak | kierunek ~N(0, 15°), prędkość ~lognormal(0, 0,2) | **tak** |
+| harmonogram uwolnienia | równomierny 24 h | z pliku Katata (albo równomierny) | z `--release` | nie (ułamki w tym samym przebiegu) |
+| próbka Q | lognormal wokół `sites.yaml` | lognormal wokół sumy z pliku | lognormal wokół sumy z `--release` (×/÷ 2) | **nie**: model jest liniowy względem Q |
 
-**Liniowość względem Q** to najważniejsza decyzja wydajnościowa. Smugę liczymy dla
-uwolnienia 1 Bq (`unit_dep_per_bq`), a próbki Q mnożymy dopiero w gold. 100 próbek Q
-kosztuje tyle co jedna.
+Tabele opisujące zestawy (`silver/scenarios.py`, `silver/events.py`):
+- `silver.scenarios`: epizody × warianty,
+- `silver.source_terms`: całkowita ilość (mediana, gsd, pochodzenie),
+- `silver.release_schedule`: ułamek całości w godzinie h, suma = 1,
+- `silver.q_samples`: próbki Q per zestaw.
+
+**Liniowość względem Q** to najważniejsza decyzja wydajnościowa. Transport liczymy dla
+uwolnienia 1 Bq rozłożonego w czasie według harmonogramu (`unit_dep_per_bq`), a próbki Q
+mnożymy dopiero w gold. 100 próbek Q kosztuje tyle co jedna. Dlatego harmonogram jest
+zapisany jako **ułamki**, a nie Bq na godzinę.
 
 ### 4.4 Agregacja (`gold/aggregates.py`)
 
@@ -283,7 +336,7 @@ src/radplume/
 ├── simulators/   dane symulowane → landing
 ├── bronze/  silver/  gold/  validation/   transformacje
 ├── app/          warstwa serwująca
-├── pipelines/    orkiestracja (context, batch, stream)
+├── pipelines/    orkiestracja (context, batch, stream, event)
 └── cli.py        punkt wejścia
 ```
 
@@ -349,11 +402,12 @@ dubluje wierszy (sprawdza to `tests/integration/test_pipeline.py`).
 | Mechanizm | Gdzie | Chroni przed |
 |---|---|---|
 | MERGE po kluczu naturalnym | `bronze.meteo`, `silver.meteo` | duplikaty przy ponownym wczytaniu plików |
-| overwrite z `replaceWhere` | `silver.dispersion_episode` | stan mieszany po awarii w połowie |
+| overwrite z `replaceWhere` po lokalizacji i zestawie | `silver.dispersion_episode`, tabele scenariuszy | stan mieszany po awarii w połowie; `run-batch` i `event` nie kasują sobie wyników |
+| pełne nadpisanie, gdy w danych są nowe kolumny | `core/storage.py` | stare wiersze bez nowej kolumny (np. `scenario_set`) zostawione przez `replaceWhere` po aktualizacji kodu |
 | pliki landing jako cache, zapis przez plik tymczasowy + rename | `ingest/` | ponowne odpytywanie API, połówki plików JSON |
 | stałe nazwy plików + checkpoint strumienia | `simulators/`, `pipelines/stream.py` | ponowne przetworzenie tych samych odczytów |
 | `txnAppId/txnVersion` | `foreachBatch` | podwójny zapis powtórzonego mikro-batcha |
-| `random.Random(seed ^ crc32(nazwa))` | scenariusze, symulator | inne scenariusze przy innej liczbie rdzeni (`F.rand` zależy od partycji); `hash()` Pythona jest losowany przy starcie |
+| `random.Random(seed ^ crc32(nazwa))` | scenariusze, zdarzenia (klucz = nazwa zdarzenia), symulator | inne scenariusze przy innej liczbie rdzeni (`F.rand` zależy od partycji); `hash()` Pythona jest losowany przy starcie |
 | `argmax` przez `max(struct(...))` zamiast `max_by` | gold, dispersion | inny wynik przy remisie zależnie od kolejności partycji |
 | UTC w sesji Sparka i w procesie Pythona | `core/session.py` | przesunięcie godzin o 1–2 h między laptopem a klastrem |
 | dokładne percentyle zamiast `percentile_approx` | gold | wynik zależny od kolejności danych |
@@ -372,6 +426,9 @@ kolejności partycji. Idempotencja oznacza więc te same wartości z dokładnoś
 | `silver/meteo.py` | kompletność zmiennych, fizyczny zakres wiatru i opadu | wiersz odrzucony, liczba w `ops.dq_metrics` |
 | `silver/meteo.py` | `grid_elevation ≤ 0` dla lokalizacji lądowej | tylko ostrzeżenie (współrzędne podejrzane) |
 | `pipelines/batch.py` | godziny epizodów bez meteo | metryka `episode_hours_missing_meteo` |
+| `silver/puff.py` | brak pogody w trakcie lotu obłoku | śledzenie obłoku kończy się na pierwszej luce (nie zgadujemy wiatru) |
+| `silver/scenarios.py` | uwolnienie z pliku poza oknem epizodu | pominięte, ostrzeżenie z odsetkiem pominiętej ilości |
+| `silver/events.py` | niepoprawny zapis `--release`, ilość ≤ 0 | błąd przed startem Sparka |
 | `silver/sensor_clean.py` | lag > 15 min | `ops.sensor_late_rejected` |
 | | duplikat `(device_id, event_time)` | usunięty (dedup) |
 | | wiatr poza 0–45 m/s, dawka poza zakresem detektora, brak dawki przy zasilaniu, nieznane urządzenie | `ops.sensor_quarantine` z listą złamanych reguł |
@@ -391,16 +448,24 @@ Trzy poziomy reakcji są zróżnicowane świadomie. Odpowiadają `expect_or_fail
 | Technika | Gdzie | Efekt |
 |---|---|---|
 | liniowość względem Q | dispersion → gold | próbki ilości uwolnienia nie mnożą kosztu smugi |
-| odcięcie wierszy pod wiatr i poza ±4σy | `hourly_unit_deposition` | większość iloczynu komórki × godziny odpada przed agregacją |
+| odcięcie wierszy pod wiatr i poza ±4σy | `hourly_unit_deposition` (straight) | większość iloczynu komórki × godziny odpada przed agregacją |
+| komórki z prostokąta ±4σy wokół odcinka, indeksy liczone wzorem | `puff_unit_deposition` | kilka–kilkadziesiąt komórek na odcinek zamiast całej siatki |
+| trajektoria liczona raz, nuklidy dołączane dopiero przy depozycji | `silver/puff.py` | koszt trajektorii niezależny od liczby nuklidów |
+| harmonogram jako join wewnętrzny | oba modele | godziny bez uwolnienia (np. zdarzenie z 2 zrzutami) nie są liczone |
 | `broadcast` małych tabel (siatka, nuklidy, lokalizacje, próbki Q, progi) | joiny | brak shuffle'a dużej strony |
 | brak utrwalania wyniku godzinowego w klimatologii | `aggregate_episodes` | zapis N razy mniejszy (plan 3.4) |
 | przypisanie punkt → komórka wzorem | `silver/grid.py` | bez joinu przestrzennego i bibliotek natywnych |
 | partycjonowanie po `site_id` | `dispersion_episode`, `risk_map` | niezależne przeliczanie lokalizacji, pruning przy odczycie |
 | zakaz pandas/UDF/`collect()` na dużych danych w silver/gold | cały kod transformacji | całość liczy optymalizator Sparka na executorach |
 
-**Rząd wielkości (P20):** PROD to ~100×100 komórek × 24 h × 200 epizodów × 5 wariantów × 2 nuklidy,
-czyli ok. 0,5 mld prostych obliczeń w jednym przebiegu (przed odcięciem wierszy spoza smugi).
-Zapisywane są tylko agregaty. Wydłużenie epizodu do 72 h (jak w planie) daje ok. 1,5 mld.
+**Rząd wielkości (P20).** Model `puff`:
+- Koszt rośnie z liczbą **odcinków trajektorii** (epizody × warianty × godziny uwolnienia × 72 kroki)
+  razy liczbą komórek w prostokącie wokół odcinka.
+- Zmierzone lokalnie (siatka 5 km): 62 tys. odcinków → ok. 490 tys. wierszy depozycji dla dwóch
+  nuklidów, czyli ok. 4 komórki na odcinek i nuklid.
+- PROD (200 × 5 × 24 × 72 ≈ 1,7 mln odcinków, siatka 2 km, więc ok. 6 razy więcej komórek na
+  odcinek) daje rząd **10⁸ wierszy** w jednym przebiegu.
+- Zapisywane są tylko agregaty. Model `straight` byłby dla PROD rzędu 0,5 mld obliczeń przed odcięciem.
 
 **Znane granice:**
 - Dokładne percentyle zbierają wartości grupy do tablicy (`collect_list`). W PROD to do ok. 100 tys.
@@ -447,6 +512,11 @@ W obu miejscach ANSI SQL jest domyślnie włączony, więc kod jest ANSI-bezpiec
 | D10 | Docker jako zalecane środowisko lokalne | natywny Windows | Spark na Windows wymaga winutils/hadoop.dll |
 | D11 | ingest bez Sparka (requests + pliki) | Spark do pobierania z API | małe pliki, łatwa podmiana źródła, cache w landing |
 | D12 | dane symulowane w osobnym pakiecie `simulators/` | razem z `ingest/` | od razu widać, co jest realne (ograniczenia, plan VIII) |
+| D13 | harmonogram uwolnienia jako ułamki całości | Bq na godzinę w transporcie | zachowuje liniowość względem Q (D5); ta sama maszyneria dla klimatologii, walidacji i zdarzeń |
+| D14 | zdarzenie jako osobny `scenario_set` w tych samych tabelach | osobne tabele / osobny potok | gold, `ask`, walidacja i dashboard działają bez zmian; wiele zdarzeń obok siebie |
+| D15 | zaburzenie pogody stałe dla członka zespołu | niezależny szum co godzinę | odpowiada systematycznemu błędowi reanalizy dla danego dnia; szum godzinowy uśredniałby się i zaniżał rozrzut |
+| D16 | model obłoków z analityczną całką wzdłuż odcinka (ΔΦ) | obłoki punktowe co krok; model lagranżowski cząstek | brak „dziur” między pozycjami obłoku; przy stałym wietrze zgodny ze smugą (test); reużywa przetestowanych wzorów |
+| D17 | Φ z przybliżenia erf w wyrażeniach Sparka | Python UDF z `math.erf` / scipy | UDF zakazany w silver (plan 3.1), wolny i nieprzenośny; błąd przybliżenia < 1,5·10⁻⁷ |
 
 ---
 
@@ -454,20 +524,26 @@ W obu miejscach ANSI SQL jest domyślnie włączony, więc kod jest ANSI-bezpiec
 
 **Działa lokalnie:**
 - ścieżki A, B i C end-to-end,
-- `radplume ask`,
+- model obłoków (`puff`) z trajektoriami skręcającymi razem z wiatrem,
+- harmonogram uwolnienia (w tym przebieg z pliku Katata dla walidacji 2011),
+- tryb zdarzenia `radplume event` z zespołem zaburzonej pogody,
+- `radplume ask` (także dla zdarzeń),
 - walidacja depozycji (wymaga pliku z JAEA),
-- 61 testów, CI.
+- 90 testów, CI.
+
+Historia tych zmian i ich uzasadnienie: [`docs/plan-rozszerzen.md`](plan-rozszerzen.md).
 
 **Następne kroki (kolejność według wartości dla walidacji i wymagań kursu):**
-1. godzinowy przebieg uwolnienia (Katata 2015) w epizodzie `validation_2011` zamiast równomiernej emisji,
-2. walidacja godzinowych stężeń w powietrzu (stacje SPM, Oura 2015) → `gold.validation_air`,
+1. dostarczenie danych: przebieg uwolnienia (Katata 2015) i depozycja JAEA, potem pierwsza prawdziwa walidacja,
+2. walidacja godzinowych stężeń w powietrzu (stacje SPM, Oura 2015) → `gold.validation_air`; model `puff` liczy już czas przejścia chmury,
 3. dokładne współrzędne Lubiatowa-Kopalina (dokumenty PEJ),
 4. blok 1–3 planu: workspace'y, bootstrap Unity Catalog, `databricks bundle deploy`, CI z deployem,
 5. czyszczenie czujników jako pipeline deklaratywny Lakeflow, `sql/governance.sql` (RLS/CLS),
 6. dashboard AI/BI i aplikacja AI (text-to-SQL + RAG) na Databricks.
 
 **Ograniczenia modelu** są opisane w planie (Część VIII) i w README. Najważniejsze:
-- płaski teren, jednorodny wiatr, zasięg ok. 100 km,
+- płaski teren, wiatr jednorodny w przestrzeni (zmienny tylko w czasie), zasięg ok. 100 km,
+- brak zubożenia chmury przez depozycję (konserwatywnie: zawyża depozycję daleko od źródła),
 - meteo ok. 25 km,
 - hipotetyczna ilość uwolnienia dla Lubiatowa,
 - alerty czujników testują potok, a nie trafność modelu.

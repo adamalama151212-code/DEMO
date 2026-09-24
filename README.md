@@ -25,15 +25,18 @@ strukturę gotową do przeniesienia na Databricks bez zmian w logice
 2. [Uruchomienie: Docker (zalecane, także Windows)](#uruchomienie-docker-zalecane-także-windows)
 3. [Uruchomienie: natywnie (Linux / macOS / WSL2)](#uruchomienie-natywnie-linux--macos--wsl2)
 4. [Pierwszy przebieg krok po kroku](#pierwszy-przebieg-krok-po-kroku)
-5. [Zadawanie pytań](#zadawanie-pytań)
-6. [Kroki potoku i tabele](#kroki-potoku-i-tabele)
-7. [Demo czujników (brudne dane)](#demo-czujników-brudne-dane)
-8. [Konfiguracja](#konfiguracja)
-9. [Walidacja na prawdziwych pomiarach](#walidacja-na-prawdziwych-pomiarach)
-10. [Testy](#testy)
-11. [Przejście do chmury](#przejście-do-chmury)
-12. [Ograniczenia](#ograniczenia)
-13. [Rozwiązywanie problemów](#rozwiązywanie-problemów)
+5. [Tryby online i offline](#tryby-online-i-offline)
+6. [Zadawanie pytań](#zadawanie-pytań)
+7. [Tryb zdarzenia: „wyciek o 13:00 i drugi o 16:00”](#tryb-zdarzenia-wyciek-o-1300-i-drugi-o-1600)
+8. [Model transportu: obłoki, które skręcają z wiatrem](#model-transportu-obłoki-które-skręcają-z-wiatrem)
+9. [Kroki potoku i tabele](#kroki-potoku-i-tabele)
+10. [Demo czujników (brudne dane)](#demo-czujników-brudne-dane)
+11. [Konfiguracja](#konfiguracja)
+12. [Walidacja na prawdziwych pomiarach](#walidacja-na-prawdziwych-pomiarach)
+13. [Testy](#testy)
+14. [Przejście do chmury](#przejście-do-chmury)
+15. [Ograniczenia](#ograniczenia)
+16. [Rozwiązywanie problemów](#rozwiązywanie-problemów)
 
 ---
 
@@ -45,7 +48,8 @@ Open-Meteo (ERA5) ─┐
 GeoNames (miasta) ─┼─► landing ─► bronze ─► silver ────────────────► gold
 scenariusze MC ────┘              meteo     meteo (klasa Pasquilla)   risk_map          (mapa ryzyka)
                                   cities    grid, city_cells          city_exposure  ◄── „czy X skazi Y?”
-                                            scenarios, q_samples      site_ranking
+                                            scenarios, source_terms,  site_ranking
+                                            release_schedule, q_samples
                                             dispersion_episode        expected_dose     (dla czujników)
 
 ŚCIEŻKA B — STREAMING (czujniki z celowo brudnymi danymi)
@@ -63,7 +67,8 @@ rejestr urządzeń (INSERT/UPDATE/DELETE) ─► bronze.device_cdc ─► silver
 | Konfiguracja | `src/radplume/conf/*.yaml` | fizyka, lokalizacje, progi skażenia, reguły DQ, środowiska local/dev/prod |
 | Sesja Spark | `src/radplume/core/session.py` | jedyne miejsce, które wie, czy działamy lokalnie, czy na Databricks |
 | Przechowywanie | `src/radplume/core/storage.py` | tabele Delta: lokalnie katalogi, w chmurze Unity Catalog |
-| Model fizyczny | `src/radplume/silver/dispersion.py` | smuga gaussowska w czystym Sparku (Briggs, Pasquill, depozycja, rozpad) |
+| Model fizyczny | `src/radplume/silver/dispersion.py`, `puff.py` | obłoki gaussowskie przesuwane zmiennym wiatrem (domyślnie) albo prosta smuga; Briggs, Pasquill, depozycja, rozpad — w czystym Sparku |
+| Scenariusze | `src/radplume/silver/scenarios.py`, `events.py` | Monte Carlo: klimatologia, walidacja 2011, zdarzenia użytkownika; harmonogram uwolnienia |
 | Agregacja MC | `src/radplume/gold/aggregates.py` | prawdopodobieństwa i percentyle po scenariuszach |
 | Czyszczenie czujników | `src/radplume/silver/sensor_clean.py`, `sensor_quality.py` | spóźnienia, duplikaty, spike, dryf, zamrożenie |
 | Aplikacja | `src/radplume/app/` | odpowiedzi o miasta + guardrails SQL |
@@ -182,8 +187,8 @@ każdy jest idempotentny, więc ponowne uruchomienie nie dubluje danych.
 radplume ingest-meteo     # pobiera meteo (Open-Meteo ERA5) do data/landing/meteo/
 radplume ingest-cities    # pobiera listę miast (GeoNames cities5000) do data/landing/cities/
 radplume bronze           # landing → tabele Delta bronze (MERGE po kluczu)
-radplume silver           # kontrola jakości meteo, klasa Pasquilla, siatka, miasta, scenariusze MC
-radplume dispersion       # model smugi dla wszystkich scenariuszy
+radplume silver           # kontrola jakości meteo, klasa Pasquilla, siatka, miasta, scenariusze MC + harmonogramy
+radplume dispersion       # model transportu (obłoki) dla klimatologii i walidacji
 radplume gold             # mapa ryzyka, narażenie miast, ranking lokalizacji
 radplume validation       # porównanie z pomiarami (pomijane, jeśli brak plików)
 radplume expected-dose    # oczekiwana moc dawki dla symulatora czujników
@@ -200,11 +205,29 @@ Orientacyjne czasy na laptopie (4 rdzenie) w konfiguracji `local`:
 | Etap | Offline | Prawdziwe dane |
 |---|---|---|
 | pobranie meteo (2 lokalizacje × 10 lat) | — | 1–3 min (tylko za pierwszym razem, potem cache) |
-| batch (bronze → gold) | ~1 min | ~2–4 min |
-| czujniki | ~1 min | ~1 min |
+| batch (bronze → gold) | ~1,5 min | ~2–4 min |
+| czujniki | ~0,5 min | ~0,5 min |
+| jedno zdarzenie (`radplume event`) | ~45 s | ~1 min (+ pobranie pogody dla dnia) |
 
 Dane pobrane z API zostają w `data/landing/` i działają jak cache. Chcesz pobrać
 je od nowa? Usuń odpowiedni plik lub katalog.
+
+---
+
+## Tryby online i offline
+
+| | `radplume run-all` (online, domyślny) | `radplume --offline run-all` |
+|---|---|---|
+| Pogoda | **prawdziwa**: reanaliza ERA5 z Open-Meteo | **wymyślona** przez generator w kodzie |
+| Miasta | prawdziwe: GeoNames | krótka wbudowana lista (przybliżona) |
+| Internet | potrzebny | niepotrzebny |
+| Katalog danych | `data/` | `data-offline/` |
+| Do czego | **prawdziwe wyniki** | tylko sprawdzenie, że potok działa (CI, testy, brak internetu) |
+
+**Wyniki trybu offline nie mają wartości merytorycznej.** Każda odpowiedź `ask`
+policzona na danych syntetycznych kończy się ostrzeżeniem. Katalogi są rozdzielone,
+bo pobrane pliki działają jak cache: syntetyczna pogoda w `data/` zostałaby potem
+po cichu użyta zamiast prawdziwej.
 
 ---
 
@@ -225,7 +248,7 @@ radplume show gold site_ranking
 radplume show gold live_alerts -n 50
 ```
 
-Przykładowa odpowiedź (dane offline, więc liczby są syntetyczne):
+Przykładowa odpowiedź (format; liczby z danych offline, więc bez znaczenia merytorycznego):
 
 ```
 Lubiatowo-Kopalino → Lębork: 29,0 km, azymut 191°, ok. 35 000 mieszkańców.
@@ -256,6 +279,86 @@ Dlatego podstawową miarą jest `p_exceed`, a nie średnia.
 
 ---
 
+## Tryb zdarzenia: „wyciek o 13:00 i drugi o 16:00”
+
+Klimatologia odpowiada na pytanie *„nie wiadomo, kiedy dojdzie do awarii — jaka jest szansa,
+że miasto Y zostanie skażone?”* i dlatego losuje **różne dni** z 10 lat pogody.
+Tryb zdarzenia odpowiada na inne pytanie: *„dzień, godziny i ilości są znane — gdzie pójdzie
+chmura?”*.
+
+```bash
+radplume event --site lubiatowo_kopalino --date 2020-01-15 \
+    --release 13:00=1e15 --release 16:00-18:00=5e15 --timezone Europe/Warsaw
+```
+
+| Parametr | Znaczenie |
+|---|---|
+| `--date` | dzień zdarzenia; pogoda tego dnia jest pobierana automatycznie, jeśli jej brak |
+| `--release HH:MM=Bq` | zrzut trwający godzinę od HH:MM; ilość **Cs-137** w Bq (pozostałe nuklidy w proporcji z `sites.yaml`) |
+| `--release HH:MM-HH:MM=Bq` | zrzut rozłożony równomiernie w przedziale (przez północ też działa) |
+| `--timezone` | strefa godzin z `--release`, np. `Europe/Warsaw` (domyślnie UTC); przeliczane na UTC |
+| `--name` | nazwa zdarzenia (domyślnie z daty i godziny, np. `event_20200115_1200utc`) |
+| `--members` | liczba członków zespołu (domyślnie `run.event.n_members` w `local.yaml`) |
+
+**Co robi Monte Carlo w tym trybie:** bierze pogodę tego jednego dnia i tworzy **zespół**
+wariantów, w których ją lekko zaburza, bo sama pogoda jest niepewna (reanaliza ma oczka ~25 km):
+- kierunek wiatru ± kilkanaście stopni (σ = 15°),
+- prędkość wiatru ok. ±20%,
+- klasa stabilności ±1, depozycja, wysokość uwolnienia,
+- ilość uwolnienia ×/÷ 2 wokół podanej.
+
+Członek 0 jest niezaburzony. Wynik: prawdopodobieństwo skażenia każdego miasta i czas dotarcia chmury.
+
+```
+Zdarzenie event_20200115_1200utc — Lubiatowo-Kopalino
+Uwolnienia (UTC, Cs-137):
+  2020-01-15 12:00 – 13:00: 1.00e+15 Bq
+  2020-01-15 15:00 – 16:00: 5.00e+15 Bq
+
+Miasta wg prawdopodobieństwa przekroczenia progu „teren skażony (…)”:
+  Słupsk            63.6 km  p =  46.2%  mediana dotarcia od 12:00 UTC: 4.2 h
+  Łeba              18.3 km  p =   4.1%  mediana dotarcia od 12:00 UTC: 1.5 h
+  …
+```
+*(liczby z danych offline, więc bez znaczenia merytorycznego)*
+
+Zdarzenie zapisuje się jako osobny zestaw scenariuszy. Działają na nim wszystkie narzędzia:
+
+```bash
+radplume ask --site lubiatowo_kopalino --city Słupsk --scenario-set event_20200115_1200utc
+radplume list-events
+```
+
+Ponowne przeliczenie klimatologii (`run-batch`) nie kasuje zapisanych zdarzeń, a ponowne
+uruchomienie tego samego zdarzenia nadpisuje tylko jego wyniki.
+
+---
+
+## Model transportu: obłoki, które skręcają z wiatrem
+
+Domyślny model (`physics.transport.model: puff`) traktuje masę uwolnioną w każdej godzinie
+jako **obłok**, który co 15 minut przesuwa się wiatrem z aktualnej godziny. Chmura skręca
+więc razem z wiatrem, a nie leci prosto przez 100 km, jak w prostszym modelu smugi.
+
+| | `puff` (domyślny) | `straight` (porównawczy) |
+|---|---|---|
+| Kierunek lotu | zmienia się co godzinę razem z wiatrem | stały: wiatr z godziny uwolnienia |
+| Czas dotarcia | z rzeczywistej trajektorii | odległość / prędkość wiatru z godziny uwolnienia |
+| Przy stałym wietrze | **ten sam wynik** co `straight` (test: różnica < 1%) | — |
+| Koszt lokalnie (klimatologia) | ~50 s | ~11 s |
+
+Depozycję od każdego odcinka trajektorii liczymy analitycznie (całka obłoku gaussowskiego
+wzdłuż odcinka), więc nie ma „dziur” między kolejnymi położeniami obłoku. Szczegóły:
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), sekcja 4.2.
+
+**Przebieg uwolnienia w czasie.** Emisja nie musi być równomierna: harmonogram
+(`silver.release_schedule`) mówi, jaki ułamek całości wychodzi w każdej godzinie.
+- Klimatologia: równomiernie przez 24 h.
+- Walidacja Fukushimy: z pliku Katata 2015 w `data/landing/source_term/`; bez pliku równomiernie, z ostrzeżeniem.
+- Zdarzenie: z parametrów `--release`.
+
+---
+
 ## Kroki potoku i tabele
 
 Lokalnie tabele leżą w `data/delta/<warstwa>/<tabela>/`, na Databricks jako
@@ -268,8 +371,11 @@ Lokalnie tabele leżą w `data/delta/<warstwa>/<tabela>/`, na Databricks jako
 | `silver.meteo` | site_id, time_utc | wiatr w m/s, kierunek smugi (+180°), składowe u/v, klasa Pasquilla |
 | `silver.grid` | cell_id | siatka ±100 km wokół każdej lokalizacji (układ lokalny w km) |
 | `silver.city_cells` | site_id, city_id | miasta w promieniu 100 km przypisane do komórek |
-| `silver.scenarios` | scenario_set, site_id, episode_id, variant_id | epizody pogodowe × warianty fizyczne |
-| `silver.q_samples` | site_id, nuclide, q_sample_id | próbki ilości uwolnienia (lognormal) |
+| `bronze.source_term` | — | przebieg uwolnienia z pliku (Katata/Terada), jeśli go dostarczysz |
+| `silver.scenarios` | scenario_set, site_id, episode_id, variant_id | epizody pogodowe × warianty (fizyka + zaburzenie wiatru w zdarzeniach) |
+| `silver.source_terms` | scenario_set, site_id, nuclide | całkowita ilość uwolnienia: mediana, niepewność, skąd |
+| `silver.release_schedule` | scenario_set, site_id, nuclide, h | jaki ułamek całości uwalnia się w godzinie h |
+| `silver.q_samples` | scenario_set, site_id, nuclide, q_sample_id | próbki ilości uwolnienia (lognormal) |
 | `silver.dispersion_episode` | scenariusz × komórka × nuklid | depozycja na 1 Bq uwolnienia, czas dotarcia, dominujący wiatr |
 | `gold.risk_map` | scenario_set, site, cell, próg | P(przekroczenia), P5/P50/P95 depozycji |
 | `gold.city_exposure` | scenario_set, site, city, próg | **odpowiedź na pytanie główne** |
@@ -286,8 +392,9 @@ Lokalnie tabele leżą w `data/delta/<warstwa>/<tabela>/`, na Databricks jako
 | `ops.dq_metrics` | — | dziennik metryk jakości z każdego przebiegu |
 
 **Zestawy scenariuszy (`scenario_set`):**
-- `climatology`: losowe momenty awarii z 10 lat pogody. To jest produkt, czyli odpowiedź „co jeśli”.
-- `validation_2011`: prawdziwe daty awarii w Fukushimie. Służy do porównania z pomiarami.
+- `climatology`: losowe momenty awarii z 10 lat pogody. Odpowiedź na „co jeśli, nie wiadomo kiedy”.
+- `validation_2011`: prawdziwe daty awarii w Fukushimie (i przebieg uwolnienia z pliku). Służy do porównania z pomiarami.
+- `event_…`: zdarzenia podane przez użytkownika (`radplume event`): jeden dzień, zespół z zaburzoną pogodą.
 
 ---
 
@@ -362,12 +469,16 @@ fukushima_daiichi,37.60,140.75,Cs-137,1234.5,JAEA-airborne-2011
 Potem uruchom `radplume validation`. Wyniki trafią do `gold.validation`:
 FAC2, FAC5, pokrycie przedziału P5–P95 i średni błąd logarytmiczny.
 
+**Najpierw dostarcz przebieg uwolnienia** (Katata 2015) do `data/landing/source_term/`.
+Bez niego epizod walidacyjny zakłada emisję równomierną przez 96 h, a walidacja testuje
+głównie to założenie, a nie model. Format: `docs/przygotowanie-danych.md`, pkt E.
+
 ---
 
 ## Testy
 
 ```bash
-pytest -q           # 61 testów, ok. 1–2 min (lokalny Spark)
+pytest -q           # 90 testów, ok. 2–3 min (lokalny Spark)
 ruff check src tests
 ```
 
@@ -376,11 +487,15 @@ W Dockerze: `docker compose run --rm radplume pytest -q`.
 | Plik | Co sprawdza |
 |---|---|
 | `test_physics.py` | wzory Briggsa, stężenie na osi i w poprzek (wartości analityczne), **bilans masy**, całka kolumny, kierunek smugi |
+| `test_puff.py` | model obłoków: Φ vs `math.erf`, **zgodność ze smugą przy stałym wietrze**, skręcający wiatr, brak pogody, monotoniczne σ |
+| `test_scenarios.py` | harmonogram: rozkład przedziałów na godziny, dwa zrzuty, plik walidacyjny (także wczytanie CSV), próbki Q per zestaw |
+| `test_events.py` | tryb zdarzenia: zapis wycieków, czas polski → UTC (zima/lato), przez północ, zespół członków |
 | `test_meteo.py` | odrzucenie km/h, kierunek wiatru (270° → wschód, 311° → SE), klasy Pasquilla |
 | `test_sensor_dq.py` | lag 10/20 min, duplikat, spike, dryf vs odchylenie obszarowe, zamrożenie, tło ≠ zamrożenie, warm-up |
 | `test_sensor_sim_and_cdc.py` | determinizm generatora, ~90% odczytów w paśmie modelu, SCD2 z UPDATE/DELETE/duplikatem |
 | `test_guardrails_and_app.py` | blokada DROP/DELETE/INSERT, tabel spoza gold, wielu zapytań; normalizacja nazw miast |
 | `test_pipeline.py` | **idempotencja** (dwa przebiegi → te same sumy kontrolne), spójność progów, każde miasto ma odpowiedź |
+| `test_event.py` | zdarzenie end-to-end: dociągnięcie pogody, gold, klimatologia nietknięta, ponowne uruchomienie |
 
 CI (`.github/workflows/ci.yml`) uruchamia lint i testy na każdym PR.
 
@@ -411,7 +526,7 @@ To, co się zmienia, jest **wyłącznie** w konfiguracji i w pliku bundla:
 ## Ograniczenia
 
 Pełna lista jest w planie (Część VIII). Najważniejsze:
-- model gaussowski: płaski teren, jednorodny wiatr w domenie, zasięg ok. 100 km,
+- model gaussowski: płaski teren, wiatr jednorodny w przestrzeni (zmienny tylko w czasie), zasięg ok. 100 km,
 - meteo ERA5 ok. 25 km, więc lokalna bryza i rzeźba terenu są wygładzone,
 - **tylko uwolnienie do atmosfery**, bez skażenia wód,
 - ilość uwolnienia dla Lubiatowa jest **hipotetyczna** (skala Fukushimy), a nie wynik analizy bezpieczeństwa AP1000,
@@ -433,3 +548,6 @@ Narzędzie służy do porównywania scenariuszy, **nie** do prognoz ani decyzji 
 | brak internetu | `radplume --offline run-all` (dane syntetyczne w osobnym katalogu `data-offline/`) |
 | „Smuga nie dociera do żadnej komórki w oknie symulacji” | zmień `demo.sim_start_offset_h` w `sensor_dq.yaml` |
 | chcę zacząć od zera | usuń `data/` (albo `data-offline/`) |
+| `nowe kolumny … nadpisuję całą tabelę (migracja schematu)` | normalne po aktualizacji kodu: tabela ze starym schematem jest przeliczana od nowa |
+| `event`: „Brak silver.grid dla …” | najpierw `radplume run-batch` (siatka i miasta dla lokalizacji) |
+| `event`: „Niepoprawny zapis wycieku” | format `HH:MM=1e15` albo `HH:MM-HH:MM=1e15` (kropka dziesiętna, bez spacji w liczbie) |

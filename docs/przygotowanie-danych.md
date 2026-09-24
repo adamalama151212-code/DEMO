@@ -21,7 +21,7 @@ wskazuje, gdzie i kiedy przeszła prawdziwa chmura.
 | B | Miasta z populacją (GeoNames) | pytanie „czy miasto Y…” | **automatycznie** (`ingest-cities`) | `data/landing/cities/` | ✅ działa |
 | C | **Depozycja Cs-137 na gruncie** (JAEA) | walidacja: *gdzie* spadło skażenie | **Ty, ręcznie** | `data/landing/validation/deposition/` | ✅ działa (`radplume validation`) |
 | D | **Godzinowe stężenia Cs-137 w powietrzu** (SPM, Oura 2015) | walidacja: *kiedy i którędy* przeszła chmura | **Ty, ręcznie** | `data/landing/validation/air_concentration/` | 🔜 format ustalony, ingest w kolejnym kroku |
-| E | **Przebieg uwolnienia w czasie** (Katata 2015 / Terada 2020) | realny rozkład emisji zamiast równomiernego | **Ty, ręcznie** | `data/landing/source_term/` | 🔜 format ustalony, ingest w kolejnym kroku |
+| E | **Przebieg uwolnienia w czasie** (Katata 2015 / Terada 2020) | realny rozkład emisji zamiast równomiernego | **Ty, ręcznie** | `data/landing/source_term/` | ✅ działa (`radplume run-batch`) |
 | F | Pomiary wiatru ze stacji AMeDAS (opcjonalnie) | sprawdzenie, ile błędu wnosi ERA5 | **Ty, ręcznie** | `data/landing/meteo_obs/amedas/` | 🔜 opcjonalne |
 | G | Dokładne współrzędne Lubiatowa-Kopalina | poprawna lokalizacja źródła w PL | **Ty**, edycja pliku | `src/radplume/conf/sites.yaml` | ✅ wystarczy podmienić liczby |
 | H | Dokumenty do RAG (raporty, normy) | aplikacja AI: wyjaśnianie metodologii | **Ty, ręcznie** | `data/landing/documents/` | 🔜 blok 7 planu (Databricks) |
@@ -197,13 +197,14 @@ FKS-001,Futaba,37.4500,141.0120,2011-03-15T00:00:00,2011-03-15T01:00:00,Cs-137,1
 *(wiersz ilustruje format, to nie jest prawdziwy pomiar)*
 
 **Status:** format jest ustalony. Kod zapisujący godzinowe stężenia modelu w punktach stacji
-i tabela `gold.validation_air` powstaną w kolejnym kroku. Możesz już przygotować plik.
+i tabela `gold.validation_air` powstaną w kolejnym kroku. Model obłoków liczy już czas przejścia
+chmury wzdłuż trajektorii, więc brakuje tylko zapisu stężeń w punktach stacji. Możesz już przygotować plik.
 
 ---
 
-### E. Przebieg uwolnienia w czasie (source term) 🔜
+### E. Przebieg uwolnienia w czasie (source term) ✅
 
-**Po co:** obecnie epizod walidacyjny zakłada, że przez 96 h uwalniało się równo tyle samo
+**Po co:** bez tego pliku epizod walidacyjny zakłada, że przez 96 h uwalniało się równo tyle samo
 co godzinę. W rzeczywistości emisja szła w kilku krótkich zrzutach (m.in. popołudnie 12 marca,
 noc 14/15, poranek i noc 15, poranek 16 marca), a mapa skażenia zależy od tego, na jaki wiatr
 i deszcz trafił każdy zrzut. **Bez tego pliku walidacja C i D będzie zaniżona z powodu
@@ -217,7 +218,12 @@ założenia, a nie z powodu fizyki.**
 - sprawdź w tabeli jednostkę (zwykle Bq/h) i strefę czasową (zwykle **JST**, więc odejmij 9 h),
 - przedziały czasu mogą mieć różną długość (np. 3 h, 30 min). Wpisz je tak, jak są w źródle,
   bo kod rozłoży je na godziny,
-- jeśli źródło podaje wysokość uwolnienia, dopisz ją. Jeśli nie, zostaw pustą (użyty zostanie wariant z `sites.yaml`).
+- kolumnę `release_height_m` możesz wypełnić dla porządku, ale model jej jeszcze nie używa:
+  wysokość uwolnienia pochodzi z wariantów w `sites.yaml` (`release_height_m: [min, centralna, max]`),
+- okno epizodu to `validation.episode_start` + `episode_hours` w `sites.yaml`
+  (12.03.2011 06:00 UTC + 96 h). Uwolnienie poza oknem jest pomijane, a w logu pojawia się
+  ostrzeżenie z odsetkiem pominiętej ilości. Chcesz uwzględnić więcej? Wydłuż okno w `sites.yaml`
+  i poszerz `validation.meteo_range`.
 
 **Gdzie:** `data/landing/source_term/fukushima_2011_katata2015.csv`
 
@@ -239,8 +245,16 @@ fukushima_daiichi,Cs-137,2011-03-12T06:00:00,2011-03-12T07:00:00,1.0e+13,120,Kat
 ```
 *(wiersz ilustruje format, to nie są wartości z publikacji)*
 
-**Status:** format jest ustalony. Kod, który zastąpi równomierne uwolnienie w `validation_2011`
-tym przebiegiem, powstanie w kolejnym kroku.
+**Co robi program z tym plikiem** (`radplume run-batch`, kroki `bronze` i `silver`):
+1. `bronze.source_term`: plik wczytany bez zmian.
+2. Przedziały są rozkładane na pełne godziny okna epizodu, proporcjonalnie do czasu nakładania się.
+3. Całkowita ilość w oknie staje się medianą ilości dla `validation_2011` (niepewność
+   `validation.source_term_gsd`, domyślnie ×/÷ 2). Ułamki godzinowe trafiają do `silver.release_schedule`.
+4. Nuklid, którego nie ma w pliku (np. podasz tylko Cs-137), dostaje ilość z `sites.yaml`
+   i ten sam profil czasowy.
+
+Sprawdzenie: `radplume show silver release_schedule` i `radplume show silver source_terms`.
+Kolumna `source = file` oznacza dane z pliku, a `config_uniform` oznacza, że pliku nie znaleziono.
 
 ---
 
