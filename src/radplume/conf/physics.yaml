@@ -36,7 +36,7 @@ physics:
   #   straight — każda godzina uwolnienia to prosta smuga z wiatrem tej godziny
   #              (stary model, zostawiony do porównań w write-upie).
   transport:
-    model: straight   # etap 3 planu przełączy na puff
+    model: puff
     step_minutes: 15
     # Jak długo śledzimy obłok po uwolnieniu. Przy 2 m/s to ~130 km, czyli więcej niż
     # domena ±100 km; szybciej wiejący wiatr wynosi obłok poza domenę wcześniej.

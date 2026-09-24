@@ -49,14 +49,14 @@ Obecny model ma trzy słabości, które wyszły w dyskusji:
 - ✅ podsumowanie w terminalu: miasta z największym prawdopodobieństwem, czas dotarcia; `ask --scenario-set event_…`
 - ✅ testy: parsowanie wycieków i strefy czasowej, determinizm członków, przebieg end-to-end
 
-### Etap 3: Model obłoków (trajektorie) ⬜
-- ⬜ trajektoria obłoku: kroki 15 min, wiatr z danej godziny (z zaburzeniem członka), suma narastająca położenia
-- ⬜ σy, σz z przebytej drogi, niemalejące wzdłuż trajektorii
-- ⬜ depozycja z odcinka: istniejące wzory × ΔΦ wzdłuż odcinka (Φ przez przybliżenie erf)
-- ⬜ zatrzymanie śledzenia po wyjściu z domeny, po horyzoncie albo przy braku meteo
-- ⬜ `physics.transport` w konfiguracji, domyślnie `puff`
-- ⬜ testy: dokładność Φ, zgodność ze starym modelem przy stałym wietrze, skręcająca chmura dociera tam, gdzie prosta smuga nie
-- ⬜ pomiar czasu przebiegu lokalnie
+### Etap 3: Model obłoków (trajektorie) ✅
+- ✅ trajektoria obłoku: kroki 15 min, wiatr z danej godziny (z zaburzeniem członka), suma narastająca położenia
+- ✅ σy, σz z przebytej drogi, niemalejące wzdłuż trajektorii
+- ✅ depozycja z odcinka: istniejące wzory × ΔΦ wzdłuż odcinka (Φ przez przybliżenie erf)
+- ✅ zatrzymanie śledzenia po wyjściu z domeny, po horyzoncie albo przy braku meteo
+- ✅ `physics.transport` w konfiguracji, domyślnie `puff`
+- ✅ testy: dokładność Φ, zgodność ze starym modelem przy stałym wietrze, skręcająca chmura dociera tam, gdzie prosta smuga nie
+- ✅ pomiar czasu przebiegu lokalnie: `--offline run-all` 2 min 8 s (dyspersja ~50 s zamiast ~11 s), `event` ~46 s
 
 ### Etap 4: Dokumentacja i weryfikacja ⬜
 - ⬜ README (komenda `event`, model obłoków)
