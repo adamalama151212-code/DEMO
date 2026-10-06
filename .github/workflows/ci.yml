@@ -1,20 +1,32 @@
 # =============================================================================
-# CI: lint + testy jednostkowe i DQ na każdym PR (plan 4.9).
+# CI: lint, unit tests, the integration test and a wheel build for every package.
 #
-# Kolejne kroki z planu (bundle validate → deploy DEV → deploy PROD) dojdą
-# w bloku 3, gdy będzie workspace i service principal z OIDC.
+# The integration test runs the whole pipeline on synthetic inputs written in the real
+# source formats (smogcast.ingest.synthetic), so CI needs no access to GIOŚ or Open-Meteo.
+#
+# Deployment steps (bundle validate → deploy DEV → deploy PROD) are added in stage E9
+# of PLAN_SMOG.md, once the workspaces and a service principal with OIDC exist.
 # =============================================================================
 name: ci
 
 on:
-  pull_request:
+  # Every branch: a push is enough to get a run (also before a pull request exists).
   push:
+  pull_request:
     branches: [main]
+  workflow_dispatch:
+
+# A newer push to the same branch makes the older run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      TZ: UTC   # the same hours as in Docker and on the cluster (smogcast/core/session.py)
     steps:
       - uses: actions/checkout@v4
 
@@ -22,26 +34,46 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+          # There is no requirements.txt, which is what the pip cache looks for by default.
+          cache-dependency-path: |
+            requirements-dev.txt
+            packages/*/pyproject.toml
 
-      # Spark 4 wymaga Java 17+
+      # Spark 4 needs Java 17+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "17"
 
-      - name: Instalacja
-        run: pip install -e ".[dev]"
+      - name: Install all packages (editable)
+        run: |
+          pip install -r requirements-dev.txt
+          # core[local] = PySpark + delta-spark; the wheels themselves do not pull them (Databricks has both)
+          pip install -e "packages/core[local]" -e packages/ingest -e packages/bronze -e packages/silver_clean \
+                      -e packages/silver_transform -e packages/model -e packages/gold -e "packages/app[ui]" -e packages/cli
 
       - name: Lint (ruff)
-        run: ruff check src tests
+        run: ruff check packages conftest.py
 
-      # Cache jarów Delta (Ivy) — oszczędza pobieranie z Maven Central przy każdym przebiegu
+      # Delta jars cache (Ivy) — saves the Maven Central download on every run
       - uses: actions/cache@v4
         with:
           path: ~/.ivy2.5.2
-          key: ivy-delta-4.0-${{ hashFiles('pyproject.toml') }}
+          key: ivy-delta-4.0-${{ hashFiles('packages/core/pyproject.toml') }}
 
-      - name: Testy (fizyka, meteo, DQ czujników, CDC, guardrails, idempotencja)
-        env:
-          TZ: UTC
-        run: pytest -q
+      - name: Unit tests
+        run: pytest -q -m "not integration"
+
+      - name: Integration test (whole pipeline on synthetic data)
+        run: pytest -q -m integration
+
+      # Every step is deployed as its own wheel (PLAN_SMOG.md, decision D14).
+      - name: Build wheels
+        run: |
+          for p in packages/*/; do python -m build --wheel "$p"; done
+          ls packages/*/dist/*.whl
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels
+          path: packages/*/dist/*.whl

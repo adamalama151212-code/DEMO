@@ -1,0 +1,97 @@
+# =============================================================================
+# Lakeflow Job — batch path (history → model). SKELETON for stage E9.
+#
+# One task = one step = one wheel (decision D14). Every task installs smogcast-core and
+# the wheel of its step, and calls that wheel's console script with --step.
+# The task graph mirrors BATCH_ORDER in packages/cli/src/smogcast/cli/main.py — keep
+# both in sync. The live path has its own job: resources/job_smogcast_live.yml.
+# =============================================================================
+resources:
+  jobs:
+    smogcast_batch:
+      name: smogcast-batch-${var.env}
+
+      job_clusters:
+        - job_cluster_key: main
+          new_cluster:
+            spark_version: 17.3.x-scala2.13   # DBR 17 = Spark 4.0 (as locally) — 17.3 LTS
+            # per target (databricks.yml, variable node_type): availability depends on the region and subscription
+            node_type_id: ${var.node_type}
+            # Single node: the whole history runs on one laptop-sized machine locally (~15 min), so a worker
+            # would double the cost and the vCPU quota for little gain.
+            num_workers: 0
+            spark_conf:
+              spark.master: "local[*]"
+              spark.databricks.cluster.profile: singleNode
+            custom_tags: {ResourceClass: SingleNode}
+            data_security_mode: SINGLE_USER   # required for Unity Catalog
+            # The owner of a single-user cluster must be the identity the Job runs as: the deployer on DEV
+            # (development mode), the service principal on PROD (run_as in databricks.yml; CI deploys as it).
+            single_user_name: ${workspace.current_user.userName}
+            spark_env_vars:
+              SMOGCAST_ENV: ${var.env}
+
+      tasks:
+        - task_key: ingest_gios_archive
+          job_cluster_key: main
+          python_wheel_task: {package_name: smogcast_ingest, entry_point: smogcast-ingest, parameters: ["--step", "gios-archive", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/ingest/dist/*.whl}]
+
+        - task_key: ingest_weather_history
+          job_cluster_key: main
+          python_wheel_task: {package_name: smogcast_ingest, entry_point: smogcast-ingest, parameters: ["--step", "weather-forecast-history", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/ingest/dist/*.whl}]
+
+        - task_key: bronze_station_meta
+          depends_on: [{task_key: ingest_gios_archive}]
+          job_cluster_key: main
+          python_wheel_task: {package_name: smogcast_bronze, entry_point: smogcast-bronze, parameters: ["--step", "station-meta", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/bronze/dist/*.whl}]
+
+        - task_key: bronze_pm_hourly
+          depends_on: [{task_key: ingest_gios_archive}]
+          job_cluster_key: main
+          python_wheel_task: {package_name: smogcast_bronze, entry_point: smogcast-bronze, parameters: ["--step", "pm-hourly", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/bronze/dist/*.whl}]
+
+        - task_key: bronze_weather
+          depends_on: [{task_key: ingest_weather_history}]
+          job_cluster_key: main
+          python_wheel_task: {package_name: smogcast_bronze, entry_point: smogcast-bronze, parameters: ["--step", "weather-forecast", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/bronze/dist/*.whl}]
+
+        - task_key: silver_clean_pm
+          depends_on: [{task_key: bronze_pm_hourly}, {task_key: bronze_station_meta}]
+          job_cluster_key: main
+          python_wheel_task: {package_name: smogcast_silver_clean, entry_point: smogcast-silver-clean, parameters: ["--step", "pm-hourly", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/silver_clean/dist/*.whl}]
+
+        - task_key: silver_pm_daily
+          depends_on: [{task_key: silver_clean_pm}]
+          job_cluster_key: main
+          python_wheel_task: {package_name: smogcast_silver_transform, entry_point: smogcast-silver-transform, parameters: ["--step", "pm-daily", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/silver_transform/dist/*.whl}]
+
+        - task_key: silver_weather_daily
+          depends_on: [{task_key: bronze_weather}]
+          job_cluster_key: main
+          python_wheel_task: {package_name: smogcast_silver_transform, entry_point: smogcast-silver-transform, parameters: ["--step", "weather-daily", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/silver_transform/dist/*.whl}]
+
+        - task_key: silver_features
+          depends_on: [{task_key: silver_pm_daily}, {task_key: silver_weather_daily}]
+          job_cluster_key: main
+          python_wheel_task: {package_name: smogcast_silver_transform, entry_point: smogcast-silver-transform, parameters: ["--step", "features", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/silver_transform/dist/*.whl}]
+
+        - task_key: model_train
+          depends_on: [{task_key: silver_features}]
+          job_cluster_key: main
+          python_wheel_task: {package_name: smogcast_model, entry_point: smogcast-model, parameters: ["--step", "train", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/model/dist/*.whl}]
+
+        - task_key: model_backtest
+          depends_on: [{task_key: model_train}]
+          job_cluster_key: main
+          python_wheel_task: {package_name: smogcast_model, entry_point: smogcast-model, parameters: ["--step", "backtest", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/model/dist/*.whl}]

@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smogcast-app"
+version = "0.1.0"  # must equal ../../VERSION (checked by a test)
+description = "smogcast assistant: guarded SQL over gold, RAG over documents, web interface"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "smogcast-core==0.1.0",
+    # Parser-based SQL guardrails (only SELECT, whitelisted gold tables). A parser instead of
+    # regexes, because regexes are easy to bypass (comments, CTEs, subqueries).
+    "sqlglot>=25",
+    # Any OpenAI-compatible endpoint: LM Studio locally, Databricks Model Serving in the cloud.
+    "openai>=1.40",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+# Web interface (local Docker, Databricks Apps).
+ui = ["streamlit>=1.45", "plotly>=5.24"]
+# Building and querying the RAG index locally (on Databricks: Vector Search instead).
+rag = ["sentence-transformers>=3.0", "pymupdf>=1.24"]
+
+[project.scripts]
+smogcast-app = "smogcast.app.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["smogcast.*"]
+namespaces = true  # PEP 420: no src/smogcast/__init__.py in any smogcast-* wheel

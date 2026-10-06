@@ -1,35 +1,46 @@
 # =============================================================================
-# Obraz do lokalnego uruchamiania radplume (Spark 4 + Delta Lake + Java 17).
+# Local image for smogcast (Spark 4 + Delta Lake + Java 17), all step wheels
+# installed in editable mode.
 #
-# Dlaczego Docker: Spark na Windowsie wymaga winutils.exe/hadoop.dll i ręcznej
-# konfiguracji HADOOP_HOME — źródło godzin frustracji. W kontenerze Linux
-# wszystko działa tak samo na Windows, macOS i Linux, i tak samo jak w CI.
+# Why Docker: Spark on Windows needs winutils.exe/hadoop.dll and manual HADOOP_HOME —
+# a source of hours of frustration. In a Linux container everything behaves the same
+# on Windows, macOS and Linux, and the same as in CI.
 # =============================================================================
 FROM python:3.11-slim-bookworm
 
-# Java 17: minimalna wersja wymagana przez Spark 4 (Databricks Runtime 17 też używa 17).
-# procps: Spark używa `ps` przy zamykaniu procesów.
+# Java 17: minimum for Spark 4 (Databricks Runtime 17 uses 17 as well).
+# procps: Spark uses `ps` when shutting processes down.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends openjdk-17-jre-headless procps \
     && rm -rf /var/lib/apt/lists/*
 
-# TZ=UTC: te same godziny co na klastrze (patrz radplume/session.py).
+# TZ=UTC: the same hours as on the cluster (see smogcast/core/session.py).
+# HF_HOME: the embedding model is cached in the mounted data/ folder, not re-downloaded per container.
 ENV PYTHONUNBUFFERED=1 \
     TZ=UTC \
-    RADPLUME_ENV=local
+    SMOGCAST_ENV=local \
+    HF_HOME=/app/data/hf_cache
 
 WORKDIR /app
 
-# Najpierw tylko pliki potrzebne do instalacji — Docker cache'uje tę warstwę
-# i przy zmianie kodu nie instaluje zależności od nowa.
-COPY pyproject.toml README.md ./
-COPY src ./src
-RUN pip install --no-cache-dir -e ".[dev]"
+# Only what installation needs first — Docker caches this layer, so editing code
+# does not reinstall dependencies.
+COPY VERSION pyproject.toml requirements-dev.txt ./
+COPY packages ./packages
+# One pip call for all wheels: the step wheels pin smogcast-core==<version>, which pip
+# resolves from the editable core in the same call.
+# PyTorch from its CPU index first: the default wheel pulls ~2 GB of CUDA libraries that a laptop
+# container never uses (needed by sentence-transformers for the assistant's embeddings).
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir -r requirements-dev.txt \
+    && pip install --no-cache-dir \
+       -e "packages/core[local]" -e packages/ingest -e packages/bronze -e packages/silver_clean \
+       -e packages/silver_transform -e packages/model -e packages/gold -e "packages/app[ui,rag]" -e packages/cli
 
-# Pobranie jarów Delta Lake do obrazu (cache Ivy). Bez tego pierwsze uruchomienie
-# każdego kontenera ściągałoby je z Maven Central.
-RUN python -c "from radplume.config import load_config; from radplume.session import get_spark; get_spark(load_config('local')).stop()"
+# Bake the Delta Lake jars into the image (Ivy cache). Otherwise every new container
+# would download them from Maven Central on first start.
+RUN python -c "from smogcast.core.config import load_config; from smogcast.core.session import get_spark; get_spark(load_config('local')).stop()"
 
-COPY tests ./tests
+COPY conftest.py ./
 
-CMD ["radplume", "--help"]
+CMD ["smogcast", "--help"]

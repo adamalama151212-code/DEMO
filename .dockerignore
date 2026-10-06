@@ -8,3 +8,5 @@ data
 dist
 build
 data-offline
+packages/*/dist
+packages/*/build

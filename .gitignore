@@ -22,3 +22,7 @@ dist/
 .idea/
 .vscode/
 data-offline/
+
+# Built wheels of the monorepo packages
+packages/*/dist/
+packages/*/build/

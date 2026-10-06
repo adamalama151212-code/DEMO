@@ -1,406 +1,282 @@
-# Jak czytać ten kod
+# Jak czytać to repozytorium i jego wyniki
 
-Przewodnik po repozytorium: od czego zacząć, za co odpowiada każdy plik i jak pliki
-łączą się ze sobą. Architektura i uzasadnienia decyzji są w [`ARCHITECTURE.md`](ARCHITECTURE.md),
-a przygotowanie danych w [`przygotowanie-danych.md`](przygotowanie-danych.md).
+> **Dla kogo:** osoba, która widzi repozytorium pierwszy raz (prowadzący, recenzent, kolejny agent AI) i chce szybko
+> wiedzieć, gdzie co jest i jak czytać tabele wynikowe. **Stan na:** 2026-10-06.
+> Architektura i uzasadnienia: [`ARCHITECTURE.md`](ARCHITECTURE.md). Dane wejściowe: [`przygotowanie-danych.md`](przygotowanie-danych.md).
+> Decyzje, etapy i dziennik: [`PLAN_SMOG.md`](../PLAN_SMOG.md).
 
 ---
 
-## 0. Najpierw jedno nieporozumienie: czujniki NIE są wejściem modelu
+## 0. Cztery nieporozumienia, które warto wyjaśnić na starcie
 
-Łatwo pomyśleć, że na początku do bronze wczytujemy surowe dane z czujników razem z pogodą,
-a potem Monte Carlo robi z nich scenariusze. **Tak nie jest.** Kolejność jest odwrotna,
-a czujniki to osobna, późniejsza ścieżka:
+1. **Model nie uczy się z API na żywo.** Uczy się raz, na **archiwum** GIOŚ 2021–2024 (rok 2025 to test), i jest
+   zapisywany. API na żywo dostarcza tylko **cechy dnia dzisiejszego**, z których zapisany model liczy prognozę na jutro.
+2. **Popsute dane z demo nigdy nie trafiają do modelu.** `fault_replay` to kopia prawdziwych pomiarów z wstrzykniętymi
+   usterkami, osobnym torem (`source = 'fault_replay'`) — służy do pokazania, że czyszczenie działa przewidywalnie.
+   Ten sam kod czyści prawdziwy strumień `live`.
+3. **To nie jest Monte Carlo.** Prawdopodobieństwo liczy wyuczony klasyfikator (gradient boosted trees, Spark MLlib)
+   w jednym przebiegu. „Na ile to pewne” sprawdzamy kalibracją na roku testowym, a nie losowaniem scenariuszy.
+4. **Panel tylko czyta tabele gold.** Nie pobiera danych i nie uruchamia potoku — robią to Joby (Databricks) albo
+   komendy `smogcast run-…` (lokalnie).
+
+## 1. Od czego zacząć (30 minut)
+
+| Kolejność | Co | Po co |
+|---|---|---|
+| 1 | [`README.md`](../README.md) | pytanie biznesowe, wyniki, jak uruchomić |
+| 2 | [`ARCHITECTURE.md`](ARCHITECTURE.md), sekcje 1–3 | przepływ danych (ścieżki A/B/C), wheele, grafy tasków |
+| 3 | ten plik, sekcje 2–4 | gdzie jest kod i jak wygląda jeden krok od środka |
+| 4 | [`resources/job_smogcast.yml`](../resources/job_smogcast.yml) | ten sam potok jako Job Databricks |
+| 5 | [`silver_transform/features.py`](../packages/silver_transform/src/smogcast/silver_transform/features.py) i [`model/evaluate.py`](../packages/model/src/smogcast/model/evaluate.py) | serce projektu: cechy bez wycieku i uczciwa ocena |
+| 6 | ten plik, sekcja 7 | jak czytać tabele wynikowe |
+
+## 2. Mapa repozytorium
 
 ```
-KROK 1  Pogoda (prawdziwa, ERA5) ──► bronze.meteo ──► silver.meteo
-                                                         │
-KROK 2  Monte Carlo: tabele scenariuszy (MAŁE: 75 scenariuszy + harmonogramy + próbki Q) ──┤
-                                                         ▼
-KROK 3  Model transportu: scenariusze × godziny uwolnienia × kroki lotu obłoku × komórki × nuklidy
-                                                         ◄── TU jest „eksplozja” wierszy
-                                                         │
-KROK 4  Agregacja → gold.city_exposure  ◄── odpowiedź „czy miasto Y zostanie skażone?”
-─────────────────────────────────────────────────────────────── koniec ścieżki A (model)
-KROK 5  Z JEDNEGO scenariusza modelu liczymy oczekiwaną dawkę (gold.expected_dose)
-KROK 6  Symulator czujników GENERUJE odczyty na podstawie tej dawki + celowe usterki
-KROK 7  Odczyty czujników ──► bronze.sensor_raw ──► czyszczenie ──► alerty
-─────────────────────────────────────────────────────────────── ścieżka B (czujniki)
+.
+├── packages/                  kod: osobny wheel na każdy krok potoku (decyzja D14)
+│   ├── core/                  wspólna infrastruktura + konfiguracja conf/*.yaml (jedyna paczka, którą importują inne)
+│   ├── ingest/ bronze/ silver_clean/ silver_transform/ model/ gold/     wheele kroków
+│   ├── app/                   panel Streamlit + asystent (guardrails SQL, RAG, model językowy)
+│   └── cli/                   lokalna komenda `smogcast` + test integracyjny całego potoku
+├── resources/                 definicje Lakeflow Jobów (batch, na żywo)
+├── databricks.yml             Asset Bundle: artefakty (wheele), targety dev/prod
+├── sql/                       skrypty SQL dla Unity Catalog (bootstrap katalogu, schematów, Volume'ów)
+├── docs/                      dokumentacja robocza (po polsku); docs/rag/ — baza wiedzy asystenta (po angielsku)
+├── .github/workflows/ci.yml   CI: lint, testy jednostkowe, test integracyjny, budowa wheeli
+├── Dockerfile, docker-compose.yml   lokalne środowisko (Spark 4 + Delta + Java 17)
+├── conftest.py, pyproject.toml      wspólne fikstury pytest i konfiguracja narzędzi (ruff, pytest)
+├── VERSION                    wspólna wersja wszystkich wheeli
+└── PLAN_SMOG.md, HANDOFF.md, CLAUDE.md   plan i dziennik, przekazanie pracy, zasady dla agentów AI
 ```
 
-Najważniejsze fakty:
+Infrastruktura Azure (Key Vault, service principal, grupy, katalog) jest w **osobnym repo Terraform**
+(`smog-cast-terraform`) — to repo dostaje z niego tylko wartości (adres workspace'u, id principala).
 
-1. **Model (ścieżki A) w ogóle nie używa czujników.** Jego wejście to pogoda, położenie
-   elektrowni, parametry fizyczne i lista miast.
-2. **Czujniki powstają Z modelu, a nie odwrotnie.** Nie mamy prawdziwej sieci czujników
-   (EURDEP ma zakaz wykorzystania danych). Symulator bierze więc dawkę przewidzianą przez
-   model i dokłada szum oraz celowe usterki: awarie łączności, spike, dryf, zamrożenie.
-3. **Po co w takim razie czujniki?** Ścieżka B pokazuje umiejętność czyszczenia brudnych
-   danych strumieniowych, czego wymaga kurs (streaming, jakość danych, schema evolution).
-   Symuluje sytuację w trakcie awarii: pomiary na żywo porównuje się z przewidywaniem modelu.
-   **Nie służy do sprawdzania trafności modelu.** Do tego jest walidacja na prawdziwych
-   pomiarach z Fukushimy (JAEA), patrz `validation/`.
-4. **Monte Carlo nie tworzy nowych danych wejściowych.** Tworzy małe tabele „przepisów
-   na scenariusz”:
-   - `silver.scenarios`: kiedy awaria, jaka wersja fizyki, jakie zaburzenie wiatru,
-   - `silver.release_schedule`: ile uwalnia się w każdej godzinie,
-   - `silver.q_samples`: ile łącznie.
+## 3. Anatomia paczki krokowej
 
-   Dużo wierszy pojawia się dopiero w kroku 3, gdy obłok z każdej godziny uwolnienia
-   śledzimy co 15 minut i liczymy jego wpływ na pobliskie komórki. I nawet tam zapisujemy
-   tylko wynik zagregowany.
-5. **Dwa rodzaje Monte Carlo.**
-   - **Klimatologia** („nie wiadomo, kiedy”) losuje **różne dni** z 10 lat prawdziwej pogody.
-   - **Zdarzenie** (`radplume event`, „znam dzień i godziny zrzutów”) bierze **jeden dzień**
-     i zaburza jego pogodę o małe wartości: kierunek ±15°, prędkość ±20%.
+Każda paczka krokowa ma ten sam układ — po przeczytaniu jednej czyta się wszystkie:
 
-   Oba liczą się tym samym kodem i trafiają do tych samych tabel, rozróżnione kolumną `scenario_set`.
+```
+packages/bronze/
+├── pyproject.toml                 zależność od smogcast-core==<VERSION>, entry point smogcast-bronze
+├── src/smogcast/bronze/           (brak src/smogcast/__init__.py — wspólna przestrzeń nazw PEP 420)
+│   ├── main.py                    STEPS = {"pm-hourly": step_pm_hourly, …};  main = make_main("bronze", STEPS)
+│   ├── steps.py                   kroki: funkcje (Context) -> None — czytają wejście, wołają transformacje, zapisują
+│   └── pm_archive.py, weather.py… transformacje: czyste funkcje DataFrame -> DataFrame (łatwe do testowania)
+└── tests/                         testy jednostkowe paczki
+```
 
-### Ile wierszy jest na każdym etapie (rzeczywiste liczby z przebiegu `--offline`, konfiguracja `local`, model `puff`)
+**Jak wykonuje się jeden krok** (na przykładzie `smogcast-bronze --step pm-hourly --env dev`):
 
-| Etap | Tabela | Wierszy | Skąd ta liczba |
+1. [`core/runner.py`](../packages/core/src/smogcast/core/runner.py) `make_main` — parsuje `--step`, `--env`, `--offline`
+   (Spark startuje dopiero po parsowaniu, więc literówka kończy się od razu).
+2. [`core/config.py`](../packages/core/src/smogcast/core/config.py) `load_config("dev")` — wspólne pliki domenowe
+   (`cities.yaml`, `thresholds.yaml`, `model.yaml`…) + **jeden** plik środowiska (`local.yaml` / `dev.yaml` / `prod.yaml`).
+   Środowiska różnią się **tylko** tym plikiem — w kodzie nie ma `if env == …`.
+3. [`core/context.py`](../packages/core/src/smogcast/core/context.py) — `Context(cfg, spark, storage)`; sesja Sparka:
+   lokalna z Deltą albo istniejąca sesja klastra ([`core/session.py`](../packages/core/src/smogcast/core/session.py)).
+4. `STEPS["pm-hourly"](ctx)` → [`bronze/steps.py`](../packages/bronze/src/smogcast/bronze/steps.py) → transformacje z
+   `pm_archive.py` → zapis przez [`core/storage.py`](../packages/core/src/smogcast/core/storage.py).
+5. `Storage` ukrywa różnicę lokalnie/chmura: `storage.mode: path` → katalogi `data/delta/<warstwa>/<tabela>`;
+   `storage.mode: catalog` → tabele `smogcast_dev.<warstwa>.<tabela>` i Volume'y. Ta sama metoda `overwrite` /
+   `merge` / `append_idempotent` w obu trybach.
+6. Metryki jakości kroku → `ops.dq_metrics` ([`core/dq_metrics.py`](../packages/core/src/smogcast/core/dq_metrics.py)).
+
+Ten sam krok wywołują: task Joba na Databricks (`python_wheel_task`), lokalne `smogcast run bronze pm-hourly` i testy —
+jedna ścieżka kodu dla wszystkich trzech.
+
+## 4. Gdzie jest która logika
+
+### `smogcast-core` — infrastruktura i kontrakty
+
+| Moduł | Za co odpowiada |
+|---|---|
+| `config.py` | ładowanie konfiguracji, `active_cities` |
+| `session.py` | sesja Sparka (lokalnie z Deltą, na klastrze — istniejąca); strefa UTC |
+| `storage.py` | odczyt/zapis tabel i ścieżki landing/checkpoint/models w obu trybach; zapisy idempotentne |
+| `timeutil.py` | **jedyne** miejsce konwersji czasu (CET, czas lokalny, UTC, doba CET, dzień wydania prognozy) |
+| `schema.py` | wspólne kontrakty: nagłówki plików GIOŚ (polskie etykiety — nie tłumaczyć), schemat cech |
+| `runner.py`, `context.py` | wspólny punkt wejścia wheeli i kontekst kroku |
+| `dq_metrics.py` | dziennik metryk jakości `ops.dq_metrics` |
+| `conf/*.yaml` | cała konfiguracja (sekcja 6) — w wheelu jako package data |
+
+### Kroki potoku
+
+| Ścieżka | Krok (`paczka krok`) | Moduł | Wejście → wyjście |
 |---|---|---|---|
-| pogoda | `bronze.meteo` | 175 584 | 2 lokalizacje × 10 lat × 8760 h (+ 10 dni marca 2011 dla Fukushimy) |
-| siatka | `silver.grid` | 3 362 | 2 lokalizacje × 41 × 41 komórek |
-| **scenariusze MC** | `silver.scenarios` | **75** | 2 × (12 epizodów × 3 warianty) + 3 walidacyjne. Mała tabela! (+30 na każde zdarzenie z 30 członkami) |
-| ilości uwolnienia | `silver.source_terms` | 6 | zestaw × lokalizacja × nuklid (+2 na zdarzenie) |
-| harmonogram | `silver.release_schedule` | 288 | 2 × 2 nuklidy × 24 h (klimatologia) + 2 × 96 h (walidacja); zdarzenie z 2 zrzutami: +4 |
-| próbki ilości | `silver.q_samples` | 180 | (4 + 2) pary zestaw-lokalizacja-nuklid × 30 próbek (+60 na zdarzenie) |
-| **model: odcinki trajektorii** (w pamięci) | — | **62 208** (Lubiatowo, klimatologia) | 36 scenariuszy × 24 obłoki (godziny uwolnienia) × 72 kroki po 15 min |
-| **model: wiersze depozycji** (w pamięci, niezapisywane) | — | **~487 tys.** (Lubiatowo, klimatologia) | odcinek × komórki w prostokącie ±4σy wokół niego × 2 nuklidy (ok. 4 komórki na odcinek i nuklid) |
-| model: zapisany wynik | `silver.dispersion_episode` | 21 442 (Lubiatowo, klimatologia) | suma po godzinach i odcinkach → 1 wiersz na (scenariusz, komórka, nuklid) |
-| gold: × próbki Q (w pamięci) | — | ~640 tys. (Lubiatowo, klimatologia) | każdy wiersz × 30 próbek ilości uwolnienia |
-| **gold: odpowiedzi** | `gold.risk_map` | ~20 tys. | komórki × progi skażenia, z prawdopodobieństwami (wszystkie zestawy, z jednym zdarzeniem) |
-| **gold: odpowiedzi o miasta** | `gold.city_exposure` | 160 (+56 na zdarzenie) | miasta w promieniu 100 km × 4 progi × zestawy scenariuszy |
-| — ścieżka B — | | | |
-| oczekiwana dawka (1 scenariusz demo) | `gold.expected_dose` | ok. 200 tys. | 1681 komórek × ok. 120 h |
-| odczyty czujników | `bronze.sensor_raw` | ok. 1 750 | 10 czujników × 180 minut (minus awarie i wycofane urządzenie) |
-| po czyszczeniu | `silver.sensor_clean` | ok. 1 710 | minus spóźnione (> 15 min) i te w kwarantannie |
+| A | `ingest gios-archive` | `ingest/gios_archive.py` | GIOŚ → `landing/gios_archive/raw` (z ochroną przed złym plikiem) |
+| A | `ingest weather-forecast-history` | `ingest/weather.py` | Open-Meteo → `landing/weather/{short_range,day_ahead}` |
+| A | `bronze station-meta` | `bronze/station_meta.py` | metadane xlsx → `bronze.gios_stations`, `bronze.gios_positions` |
+| A | `bronze pm-hourly` | `bronze/pm_archive.py` | zip/xlsx (format szeroki) → `bronze.pm_hourly` (format długi, UTC) |
+| A, B | `bronze weather-forecast` | `bronze/weather.py` | JSON → `bronze.weather_forecast` |
+| A | `silver-clean pm-hourly` | `silver_clean/station_city.py`, `pm_clean.py` | → `silver.station_city`, `silver.pm_hourly` (+ `ops.pm_quarantine`) |
+| A | `silver-transform pm-daily` | `silver_transform/pm_daily.py` | → `silver.pm_daily_station`, `silver.pm_daily_city` (reguła 18 h, miasto = najgorsza stacja) |
+| A, B | `silver-transform weather-daily` | `silver_transform/weather_daily.py` | → `silver.weather_daily` (doba CET) |
+| A | `silver-transform features` | `silver_transform/features.py` | → `silver.features` (cechy z D, etykieta z D+1) |
+| A | `model train` | `model/prepare.py`, `train.py`, `baselines.py` | siatka na walidacji 2024 → `gold.model_selection`, modele `tuned`/`final` |
+| A | `model backtest` | `model/evaluate.py` | → `gold.backtest_predictions`, `backtest_metrics`, `reliability`, `acceptance` |
+| C | `ingest gios-registry` → `bronze station-snapshots` → `silver-clean stations-scd2` | `ingest/gios_registry.py`, `bronze/station_snapshots.py`, `silver_clean/stations_scd2.py` | migawki rejestru → CDC `silver.station_changes` → SCD2 `silver.stations` |
+| B | `ingest gios-live` | `ingest/gios_live.py` | API → `landing/gios_live` |
+| B | `silver-clean pm-stream` | `silver_clean/pm_stream.py` (+ reguły z `pm_clean.py`) | Structured Streaming → `bronze.pm_stream`, `ops.pm_late_rejected`, `ops.pm_quarantine`, `silver.pm_stream` |
+| B | `ingest weather-forecast-live` | `ingest/weather.py` | prognoza na jutro → `landing/weather/live` |
+| B | `silver-transform features-live` | `silver_transform/features.py` (te same funkcje co historia) | → `silver.features_live` |
+| B | `model forecast` | `model/steps.py` | zapisany model `final` → `gold.forecast_tomorrow` |
+| B | `gold dq-summary` | `gold/dq_summary.py` | → `gold.dq_summary` |
+| demo | `silver-clean fault-reset` → `ingest fault-replay` → … | `ingest/fault_replay.py` | usterki wg `fault_injection.yaml` → te same tabele strumienia, `source = 'fault_replay'` |
+| testy | (podpięty pod kroki ingest) | `ingest/synthetic.py` | pliki w formatach źródeł, wartości deterministyczne |
 
-Kształt „lejka” jest typowy dla symulacji: **mało danych wejściowych → ogromny iloczyn
-w trakcie obliczeń → mały, zagregowany wynik.** W PROD to rząd 10⁸ wierszy depozycji w jednym
-przebiegu (plan P20, `ARCHITECTURE.md` sekcja 12). Dlatego dla każdego odcinka bierzemy tylko
-pobliskie komórki i nie zapisujemy wyniku godzinowego.
+Kolejności kroków są w dwóch miejscach, które muszą się zgadzać: `BATCH_ORDER` / `LIVE_ORDER` / `FAULT_DEMO_ORDER` w
+[`cli/main.py`](../packages/cli/src/smogcast/cli/main.py) i grafy tasków w `resources/job_*.yml` (pilnuje tego test
+`packages/cli/tests/test_cli.py`).
 
----
+### Aplikacja (`smogcast-app`)
 
-## 1. Kolejność czytania (ścieżka nauki)
-
-Nie czytaj plików alfabetycznie. Czytaj w kolejności przepływu danych:
-
-| # | Plik | Co z niego wyniesiesz |
-|---|---|---|
-| 1 | `src/radplume/conf/local.yaml`, `sites.yaml` | jakie lokalizacje, jaka skala, skąd dane |
-| 2 | `src/radplume/cli.py` | lista wszystkich kroków i jak się je uruchamia |
-| 3 | `src/radplume/pipelines/batch.py` | **spis treści ścieżki A**: każda funkcja `step_*` czyta tabele, woła transformację, zapisuje |
-| 4 | `src/radplume/ingest/meteo.py` → `bronze/meteo.py` → `silver/meteo.py` | droga pogody od API do klasy stabilności |
-| 5 | `src/radplume/silver/scenarios.py` | jak powstają scenariusze MC, ilości i harmonogram uwolnienia |
-| 6 | `src/radplume/silver/dispersion.py` | wzory fizyczne (Briggs, gauss, depozycja), prosta smuga i wybór modelu (`unit_deposition`) |
-| 6a | `src/radplume/silver/puff.py` | **serce projektu**: obłoki przesuwane zmiennym wiatrem (domyślny model) |
-| 7 | `src/radplume/gold/aggregates.py` | jak z tysięcy scenariuszy powstaje „15% szans” |
-| 8 | `src/radplume/app/city_query.py` | jak wygląda odpowiedź dla użytkownika |
-| 8a | `src/radplume/silver/events.py` → `pipelines/event.py` | tryb zdarzenia: `radplume event` i zespół zaburzonej pogody |
-| 9 | `src/radplume/pipelines/stream.py` | **spis treści ścieżek B i C** (czujniki, rejestr urządzeń) |
-| 10 | `simulators/` → `silver/sensor_clean.py` → `silver/sensor_quality.py` → `gold/live_alerts.py` | brudne dane i ich czyszczenie |
-| 11 | `src/radplume/core/` | infrastruktura; wystarczy wiedzieć, co robi (sekcja 2) |
-| 12 | `tests/` | każdy test to mały, wykonywalny przykład działania funkcji |
-
-**Wskazówka:** pliki w `pipelines/` to mapa. Gdy nie wiesz, skąd bierze się tabela,
-szukaj w nich jej nazwy (np. `"city_exposure"`). Zobaczysz, który krok ją zapisuje
-i z czego ją liczy.
-
----
-
-## 2. Za co odpowiada każdy plik
-
-### Punkt wejścia i orkiestracja
-
-| Plik | Odpowiedzialność | Woła | Wołany przez |
-|---|---|---|---|
-| `cli.py` | komenda `radplume <krok>`: parsuje argumenty, buduje `Context`, uruchamia kroki, `event` albo `ask` | `pipelines/*`, `app/city_query.py`, `silver/events.py` (parsowanie wycieków), `core/*` | terminal, Docker, Job na Databricks |
-| `pipelines/context.py` | `Context` = konfiguracja + sesja Spark + storage, przekazywany do każdego kroku | `core/storage.py` | `cli.py`, kroki, testy |
-| `pipelines/batch.py` | kroki ścieżki A (`ingest-meteo` … `expected-dose`) i słownik `BATCH_STEPS` | `ingest/`, `bronze/`, `silver/`, `gold/`, `validation/` | `cli.py`, test integracyjny |
-| `pipelines/event.py` | `run_event`: pogoda dla dnia zdarzenia (dociągana, jeśli brak) → scenariusze zdarzenia → transport → gold; `event_summary` | `silver/events.py`, funkcje z `pipelines/batch.py` (`compute_dispersion`, `write_scenario_tables`, `refresh_*_meteo`, `step_gold`) | `cli.py` |
-| `pipelines/stream.py` | kroki ścieżek B i C (`device-registry` … `alerts`, `sensor-reset`) i `STREAM_ORDER` | `simulators/`, `silver/sensor_*`, `silver/devices_cdc.py`, `gold/live_alerts.py` | `cli.py` |
-
-### `core/`: infrastruktura (jedyne miejsce zależne od środowiska)
-
-| Plik | Odpowiedzialność |
+| Moduł | Za co odpowiada |
 |---|---|
-| `core/config.py` | wczytuje YAML (domena + środowisko), scala je, waliduje (`load_config`, `active_sites`) |
-| `core/session.py` | sesja Spark: lokalna z Delta Lake albo sesja klastra Databricks; wymusza UTC |
-| `core/storage.py` | `Storage`: odczyt i zapis tabel (`read`, `merge`, `overwrite`, `append_idempotent`), ścieżki landing i checkpointów. Lokalnie `data/delta/...`, w chmurze Unity Catalog |
-| `core/dq_metrics.py` | `log_metrics`: dopisuje metryki jakości do `ops.dq_metrics` |
+| `forecast.py` | odpowiedź „czy jutro w Y?” — deterministyczna, bez modelu językowego, z historią kalibracji |
+| `guardrails.py` | SQL od modelu językowego: tylko jeden `SELECT`, tylko tabele gold z białej listy, `LIMIT` (parser `sqlglot`, nie wyrażenia regularne) |
+| `gold.py` | odczyt gold (podmiana `gold.<tabela>` na nazwę środowiska) |
+| `assistant.py` | routing pytań (prognoza / liczby → text-to-SQL / wiedza → RAG / poza tematem → odmowa) |
+| `rag.py` | indeks dokumentów, wyszukiwanie hybrydowe (embeddingi + BM25) |
+| `llm.py` | dowolny endpoint zgodny z OpenAI (lokalnie LM Studio) |
+| `ui/` | Streamlit: `views.py` (strony Info, Tomorrow, City, Model, Data quality, Assistant), `charts.py`, `theme.py` |
 
-### `conf/`: konfiguracja (YAML jedzie w paczce)
+## 5. Uruchamianie (lokalnie, Docker)
 
-| Plik | Zawartość |
-|---|---|
-| `local.yaml` / `dev.yaml` / `prod.yaml` | gdzie są dane i jaka skala (siatka, liczba epizodów i próbek) |
-| `sites.yaml` | elektrownie: współrzędne, jurysdykcja, ilość uwolnienia, epizod walidacyjny |
-| `physics.yaml` | nuklidy (rozpad, depozycja, dawka), profil wiatru, rozkłady wariantów |
-| `thresholds.yaml` | co znaczy „skażone” (37 kBq/m², 20 mSv/rok…) i promień miast |
-| `sensor_dq.yaml` | progi jakości danych czujników + scenariusz demo |
-| `cities_fallback.csv` | zapasowa lista miast (tryb offline) |
-
-### `ingest/`: pobieranie PRAWDZIWYCH danych do landing (bez Sparka)
-
-| Plik | Odpowiedzialność | Zapisuje |
-|---|---|---|
-| `ingest/meteo.py` | zapytanie do Open-Meteo, kontrakt (m/s, UTC), ponawianie; generator syntetyczny dla `--offline` | `data/landing/meteo/<site>/<okres>.json` |
-| `ingest/cities.py` | pobranie GeoNames `cities5000` albo kopia listy zapasowej | `data/landing/cities/` |
-
-### `simulators/`: dane SYMULOWANE (bez Sparka)
-
-| Plik | Odpowiedzialność | Zapisuje |
-|---|---|---|
-| `simulators/device_registry.py` | rozmieszczenie 10 czujników (6 w smudze, 4 w tle) i feed zmian CDC (INSERT, UPDATE firmware, DELETE, duplikat) | `data/landing/device_cdc/` |
-| `simulators/sensor_sim.py` | `SensorSimulator`: co minutę odczyt dawki i wiatru z modelu + szum + usterki; `DemoSchedule` wymusza usterki w konkretnych minutach | `data/landing/sensor_stream/batch_*.json` |
-
-### `bronze/`: landing → surowe tabele Delta
-
-| Plik | Odpowiedzialność | Tabela |
-|---|---|---|
-| `bronze/meteo.py` | JSON z tablicami godzinowymi → 1 wiersz na godzinę; jawny schemat; `source_file` | `bronze.meteo` |
-| `bronze/cities.py` | TSV GeoNames albo CSV zapasowy → wspólny schemat | `bronze.cities` |
-| `bronze/source_term.py` | przebieg uwolnienia z pliku (Katata/Terada), jeśli jest w `landing/source_term/` | `bronze.source_term` |
-
-### `silver/`: czyszczenie i obliczenia
-
-| Plik | Odpowiedzialność | Tabela |
-|---|---|---|
-| `silver/meteo.py` | kontrola jakości, **kierunek smugi = wiatr + 180°**, składowe u/v, **klasa Pasquilla** | `silver.meteo` |
-| `silver/grid.py` | siatka ±100 km wokół elektrowni; przypisanie miast i pomiarów do komórek; odległości i azymuty | `silver.grid`, `silver.city_cells` |
-| `silver/scenarios.py` | **scenariusze MC** dla klimatologii i walidacji: momenty awarii × warianty fizyczne; ilości (`source_terms`), **harmonogram uwolnienia** (także z pliku Katata), próbki Q; wspólna klasa `ScenarioTables` | `silver.scenarios`, `source_terms`, `release_schedule`, `q_samples` |
-| `silver/events.py` | **tryb zdarzenia**: parsowanie `--release` (strefy czasowe), zespół członków z zaburzonym wiatrem, harmonogram z godzin zrzutów | te same cztery tabele, zestaw `event_…` |
-| `silver/dispersion.py` | wzory fizyczne jako funkcje `Column` (Briggs, gauss, kolumna, wymywanie), godziny uwolnienia z pogodą i zaburzeniem, **prosta smuga** (`straight`), wybór modelu (`unit_deposition`), agregacja do epizodów, oczekiwana dawka dla czujników | `silver.dispersion_episode` (+ `gold.expected_dose`) |
-| `silver/puff.py` | **model obłoków** (domyślny): trajektorie co 15 min, σ z przebytej drogi, depozycja z odcinka × ΔΦ, prostokąt komórek wokół odcinka | (ten sam wynik co `dispersion.py`) |
-| `silver/devices_cdc.py` | feed CDC → historia wersji urządzeń (SCD typ 2) | `silver.devices` |
-| `silver/sensor_clean.py` | reguły bezstanowe czujników: spóźnienie (lag), deduplikacja, reguły twarde → kwarantanna, dołączenie wersji urządzenia | `silver.sensor_clean`, `ops.sensor_*` |
-| `silver/sensor_quality.py` | reguły wymagające historii: reszta vs model, dryf, zamrożenie, skok wiatru, warm-up, porównanie z sąsiadami | `silver.sensor_quality` |
-
-### `gold/`: odpowiedzi
-
-| Plik | Odpowiedzialność | Tabela |
-|---|---|---|
-| `gold/aggregates.py` | nałożenie próbek Q, prawdopodobieństwa przekroczenia progów, percentyle, najgroźniejszy kierunek wiatru, ranking lokalizacji | `gold.risk_map`, `gold.city_exposure`, `gold.site_ranking` |
-| `gold/live_alerts.py` | pasmo P5–P95 modelu, alerty „sygnał” vs „usterka”, podsumowanie jakości danych | `gold.live_alerts`, `gold.sensor_dq_summary` |
-
-### `validation/` i `app/`
-
-| Plik | Odpowiedzialność |
-|---|---|
-| `validation/metrics.py` | pomiary JAEA z CSV → porównanie z modelem w tej samej komórce → FAC2, FAC5, pokrycie P5–P95 (`gold.validation`) |
-| `app/city_query.py` | `radplume ask`: rozpoznanie miasta, zapytanie do `gold.city_exposure`, odpowiedź po polsku, odmowa dla niemodelowanych danych |
-| `app/guardrails.py` | `validate_select`: tylko SELECT, tylko tabele gold, wymuszony LIMIT (parser sqlglot) |
-
-### Pliki poza `src/`
-
-| Plik | Odpowiedzialność |
-|---|---|
-| `pyproject.toml` | zależności, komenda `radplume`, konfiguracja ruff i pytest |
-| `Dockerfile`, `docker-compose.yml` | środowisko lokalne (Python + Java 17 + Spark + Delta) |
-| `databricks.yml`, `resources/job_radplume.yml` | szkielet wdrożenia na Databricks: każdy krok CLI = task Joba |
-| `.github/workflows/ci.yml` | CI: lint + testy na każdym PR |
-| `tests/unit/`, `tests/integration/` | testy; opis w sekcji 5 |
-
----
-
-## 3. Połączenia: który krok, który plik, która tabela
-
-### Ścieżka A: model
-
-```mermaid
-flowchart TD
-    subgraph K1[krok ingest-meteo / ingest-cities]
-        IM[ingest/meteo.py] --> LM[(landing/meteo)]
-        IC[ingest/cities.py] --> LC[(landing/cities)]
-    end
-    subgraph K2[krok bronze]
-        LM --> BMpy[bronze/meteo.py] --> BM[(bronze.meteo)]
-        LC --> BCpy[bronze/cities.py] --> BC[(bronze.cities)]
-    end
-    subgraph K3[krok silver]
-        BM --> SMpy[silver/meteo.py] --> SM[(silver.meteo)]
-        GRpy[silver/grid.py] --> GR[(silver.grid)]
-        BC --> GRpy2[silver/grid.py<br/>assign_points_to_cells] --> CC[(silver.city_cells)]
-        BST[(bronze.source_term<br/>opcjonalnie)] --> SCpy
-        SCpy[silver/scenarios.py] --> SC[(silver.scenarios)]
-        SCpy --> RS[(silver.release_schedule)]
-        SCpy --> STT[(silver.source_terms)]
-        SCpy --> QS[(silver.q_samples)]
-    end
-    subgraph K4[krok dispersion]
-        SM --> DI[silver/dispersion.py unit_deposition<br/>→ silver/puff.py puff_unit_deposition<br/>→ aggregate_episodes]
-        GR --> DI
-        SC --> DI
-        RS --> DI
-        STT --> DI
-        DI --> DE[(silver.dispersion_episode)]
-    end
-    subgraph K5[krok gold]
-        DE --> AG[gold/aggregates.py]
-        QS --> AG
-        CC --> AG
-        AG --> RM[(gold.risk_map)]
-        AG --> CE[(gold.city_exposure)]
-        AG --> SR[(gold.site_ranking)]
-    end
-    CE --> ASK[app/city_query.py<br/>radplume ask]
-    RM --> VA[validation/metrics.py] --> GV[(gold.validation)]
+```powershell
+docker compose build                                                    # raz (kilka minut)
+docker compose run --rm smogcast smogcast steps                         # lista kroków wszystkich wheeli
+docker compose run --rm smogcast smogcast run-batch                     # historia → model (prawdziwe dane, internet; dziesiątki minut — w tle)
+docker compose run --rm smogcast smogcast run-live                      # prognoza na jutro (wymaga run-batch)
+docker compose run --rm smogcast smogcast run-fault-demo                # demo czyszczenia (2–3 min)
+docker compose run --rm smogcast smogcast show gold forecast_tomorrow -n 20
+docker compose run --rm smogcast smogcast ask --city Kraków             # odpowiedź słowami, bez modelu językowego
+docker compose up -d app                                                # panel: http://localhost:8501
 ```
 
-### Tryb zdarzenia (`radplume event`)
+Pojedynczy krok tak jak w tasku Joba: `docker compose run --rm smogcast smogcast-bronze --step pm-hourly`.
+Bez internetu: `smogcast --offline run-batch` — dane syntetyczne w `data-offline/`, **wyniki nie są prawdziwe**.
 
-```mermaid
-flowchart TD
-    CLI[cli.py event<br/>--site --date --release] --> PR[silver/events.py<br/>parse_release, EventSpec]
-    PR --> RE[pipelines/event.py run_event]
-    RE -->|brak pogody dla dnia| IM[ingest/meteo.py] --> BMF[bronze.meteo → silver.meteo]
-    RE --> BT[silver/events.py build_event_tables<br/>zespół członków]
-    BT -->|replaceWhere scenario_set = event_…| SCT[(silver.scenarios, source_terms,<br/>release_schedule, q_samples)]
-    SCT --> CD[pipelines/batch.py compute_dispersion<br/>tylko ten zestaw]
-    CD --> DE[(silver.dispersion_episode)]
-    DE --> GOLD[pipelines/batch.py step_gold] --> CE[(gold.city_exposure)]
-    CE --> SUM[event_summary<br/>+ radplume ask --scenario-set event_…]
+## 6. Konfiguracja (`packages/core/src/smogcast/core/conf/`)
+
+| Plik | Co ustawia |
+|---|---|
+| `local.yaml`, `dev.yaml`, `prod.yaml` | **jedyna różnica między środowiskami**: tryb i miejsce zapisu, katalog UC, Volume'y, ustawienia Sparka, miasta, lata |
+| `cities.yaml` | 10 miast: nazwa w GIOŚ, województwo i `jurisdiction_code` (RLS), współrzędne do pogody; zanieczyszczenia |
+| `thresholds.yaml` | normy (PM10 50, PM2.5 25 µg/m³) ze źródłami, reguła 18 h, próg ostrzeżenia 0,5 |
+| `model.yaml` | podział lat (trening/walidacja/test), cechy, siatki parametrów, **kryteria K1–K4 (zamrożone)** |
+| `pm_dq.yaml` | reguły jakości: kwarantanna, spóźnienia, zamrożenie, skok, dryf |
+| `gios.yaml`, `weather.yaml` | adresy i identyfikatory źródeł |
+| `fault_injection.yaml` | okno i harmonogram usterek demo |
+| `synthetic.yaml` | generator danych testowych |
+| `app.yaml` | aplikacja: model językowy, text-to-SQL, RAG (źródła dokumentów) |
+
+## 7. Jak czytać wyniki (tabele gold)
+
+Lokalnie: `smogcast show gold <tabela>`; na Databricks: `smogcast_<env>.gold.<tabela>`. Każdy widok panelu pokazuje
+swój SQL, więc można go skopiować do SQL Editora.
+
+### `gold.forecast_tomorrow` — odpowiedź na pytanie główne
+
+Jeden wiersz na (miasto, zanieczyszczenie, dzień docelowy).
+
+| Kolumna | Jak czytać |
+|---|---|
+| `issue_day` → `target_day` | prognoza wydana w dniu D (CET) na dzień D+1 |
+| `probability` | prawdopodobieństwo, że **średnia dobowa najgorszej stacji miasta** przekroczy normę (`limit_ug_m3`) |
+| `warned` | `probability ≥ 0,5` (próg z `thresholds.yaml`) |
+| `status`, `unusable_reason` | `ok` albo `no_forecast` z powodem (np. brak wczorajszych pomiarów, niepełna prognoza pogody) — **nigdy zgadywana wartość** |
+| `model`, `model_version`, `weather_source` | który model operacyjny i jaka prognoza pogody |
+| `pm_d1_max_ug_m3`, `pm_d_morning_max_ug_m3`, `t_mean_c`, `wind_mean_ms`, `calm_hours`, `precip_sum_mm` | najważniejsze cechy — „dlaczego taka prognoza” (wczorajsza średnia, dzisiejszy poranek, pogoda na jutro) |
+| `jurisdiction_code` | województwo — kolumna pod filtr wierszy (RLS) |
+
+```sql
+SELECT city_name, pollutant, target_day, ROUND(probability, 2) AS p, warned, status
+FROM gold.forecast_tomorrow ORDER BY probability DESC;
 ```
 
-Tryb zdarzenia nie ma własnych tabel ani własnego modelu: dopisuje nowy `scenario_set`
-do tych samych tabel i używa tych samych funkcji co `run-batch`.
+### Jak dobry jest model — `backtest_metrics`, `reliability`, `acceptance`
 
-### Ścieżki B i C: czujniki i rejestr urządzeń
+- `gold.backtest_metrics` — wiersz na (model, split, zanieczyszczenie, miasto; `city_id = 'ALL'` = wszystkie miasta).
+  `model` = `gbt` / `logistic` / `persistence` / `climatology`; `split` = `validation` (2024) / `test` (2025).
 
-```mermaid
-flowchart TD
-    SM[(silver.meteo)] --> ED
-    SC[(silver.scenarios)] --> ED[krok expected-dose<br/>silver/dispersion.py<br/>expected_dose_series]
-    ED --> GED[(gold.expected_dose)]
+  | Metryka | Po ludzku | Lepiej |
+  |---|---|---|
+  | `brier` | średni błąd kwadratowy prawdopodobieństwa | niżej (0 = idealnie) |
+  | `bss` | o ile lepiej niż klimatologia (średnia z kalendarza) | > 0 |
+  | `auc` | jak dobrze model porządkuje dni od najbezpieczniejszych do najgroźniejszych | bliżej 1 |
+  | `pod` | z dni z przekroczeniem — w ilu model ostrzegł | wyżej |
+  | `far` | z ostrzeżeń — ile było fałszywych | niżej |
+  | `csi` | łączna miara trafień bez dni „spokojnych” | wyżej |
 
-    GED --> DR[krok device-registry<br/>simulators/device_registry.py]
-    DR --> LCDC[(landing/device_cdc)] --> SCD[silver/devices_cdc.py] --> DEV[(silver.devices SCD2)]
+- `gold.reliability` — kalibracja: grupy dni o podobnej prognozie (`bin_from`–`bin_to`), średnia prognoza
+  (`mean_probability`) i jak często naprawdę było przekroczenie (`observed_frequency`); `gap` = rozbieżność.
+  „70%” ma znaczyć ok. 70%. Przedziały z < 30 dniami nie są oceniane (K3).
+- `gold.acceptance` — werdykt **K1–K4** na roku testowym 2025 (`criterion`, `value`, `threshold`, `passed`).
+  Kryteria zamrożono **przed** treningiem i nie zmienia się ich po zobaczeniu wyniku.
+- `gold.model_selection` — siatka parametrów z Brierem walidacyjnym; `operational = true` = model użyty do prognoz
+  (najniższy Brier na walidacji 2024 — reguła zamrożona przed wynikami).
 
-    GED --> SIM[krok sensor-sim<br/>simulators/sensor_sim.py]
-    DEV --> SIM
-    SM --> SIM
-    SIM --> LS[(landing/sensor_stream)]
-
-    LS --> ST[krok sensor-stream<br/>silver/sensor_clean.py]
-    DEV --> ST
-    ST --> RAW[(bronze.sensor_raw)]
-    ST --> LATE[(ops.sensor_late_rejected)]
-    ST --> CL[(silver.sensor_clean)]
-    ST --> QU[(ops.sensor_quarantine)]
-
-    CL --> SQ[krok sensor-quality<br/>silver/sensor_quality.py]
-    GED --> SQ
-    SQ --> SQT[(silver.sensor_quality)]
-    SQT --> AL[krok alerts<br/>gold/live_alerts.py]
-    AL --> GLA[(gold.live_alerts)]
-    AL --> DQS[(gold.sensor_dq_summary)]
+```sql
+SELECT pollutant, criterion, description, ROUND(value, 3) AS value, threshold, passed
+FROM gold.acceptance ORDER BY pollutant, criterion;
 ```
 
-Kluczowa strzałka: `gold.expected_dose` → symulator. To jedyne miejsce, gdzie model
-wpływa na czujniki. W drugą stronę (czujniki → model) nie ma żadnej strzałki.
+Obowiązujący werdykt (2026-10-06): **PM2.5 spełnia K1–K3; PM10 nie spełnia K4a** (wykrywalność 44% < 60%), a K3 jest
+na granicy. Szczegóły i dlaczego PM10 jest trudniejszy: [`ARCHITECTURE.md`](ARCHITECTURE.md), sekcja 6, oraz
+[`ulepszenia-pm10.md`](ulepszenia-pm10.md).
 
-### Tabela: kto zapisuje, kto czyta
+### Jakość danych — `gold.dq_summary` i tabele `ops`
 
-| Tabela | Zapisuje (krok → plik) | Czytają |
+- `gold.dq_summary` — per źródło (`live` / `fault_replay`): unikalne odczyty, ponowne wysyłki, spóźnione, kwarantanna
+  wg powodu, flagi; `pct_of_unique` = udział w unikalnych odczytach.
+- `ops.pm_quarantine` (z `quarantine_reason`), `ops.pm_late_rejected` (z `lag_hours`) — nic nie znika po cichu.
+- `silver.pm_stream.dq_flag` = `ok` / `frozen` / `spike` / `drift` — odczyty oflagowane zostają, ale nie liczą się do
+  prognozy.
+- Gotowe zapytania z komentarzem: [`demo-jakosc-danych.md`](demo-jakosc-danych.md).
+
+## 8. Testy
+
+| Co | Gdzie | Komenda |
 |---|---|---|
-| `bronze.meteo` | `bronze` → `bronze/meteo.py` | `silver` |
-| `bronze.cities` | `bronze` → `bronze/cities.py` | `silver` |
-| `silver.meteo` | `silver` → `silver/meteo.py` | `dispersion`, `expected-dose`, `sensor-sim`, `ask` (sprawdza, czy dane syntetyczne) |
-| `silver.grid` | `silver` → `silver/grid.py` | `dispersion`, `gold`, `validation`, `expected-dose`, `device-registry` |
-| `silver.city_cells` | `silver` → `silver/grid.py` | `gold` |
-| `bronze.source_term` | `bronze` → `bronze/source_term.py` (gdy jest plik) | `silver` |
-| `silver.scenarios`, `source_terms`, `release_schedule`, `q_samples` | `silver` → `silver/scenarios.py` (bez zdarzeń); `event` → `silver/events.py` (tylko swoje zdarzenie) | `dispersion`, `event`, `gold`, `expected-dose`, `device-registry`, `sensor-sim`, `list-events` |
-| `silver.dispersion_episode` | `dispersion` / `event` → `silver/dispersion.py` + `silver/puff.py` | `gold` |
-| `gold.risk_map` | `gold` → `gold/aggregates.py` | `validation`, dashboard |
-| `gold.city_exposure` | `gold` → `gold/aggregates.py` | `site_ranking`, `ask`, `list-cities` |
-| `gold.expected_dose` | `expected-dose` → `silver/dispersion.py` | `device-registry`, `sensor-sim`, `sensor-quality` |
-| `silver.devices` | `device-registry` → `silver/devices_cdc.py` | `sensor-sim`, `sensor-stream` |
-| `bronze.sensor_raw` | `sensor-stream` | `sensor-stream` (dalsze zapytania), `alerts` |
-| `silver.sensor_clean`, `ops.sensor_*` | `sensor-stream` → `silver/sensor_clean.py` | `sensor-quality`, `alerts` |
-| `silver.sensor_quality` | `sensor-quality` → `silver/sensor_quality.py` | `alerts` |
-| `gold.live_alerts`, `gold.sensor_dq_summary` | `alerts` → `gold/live_alerts.py` | dashboard |
-| `ops.dq_metrics` | `silver`, `dispersion`, `sensor-stream` → `core/dq_metrics.py` | dashboard |
+| wszystko (≈ 6 min) | `packages/*/tests/` | `docker compose run --rm smogcast pytest -q -p no:logging` |
+| tylko jednostkowe | | `… pytest -q -p no:logging -m "not integration"` |
+| test integracyjny (≈ 3 min) | [`cli/tests/test_integration.py`](../packages/cli/tests/test_integration.py) | `… pytest -q -p no:logging -m integration` |
+| lint | | `… ruff check packages conftest.py` |
 
----
+Testy-strażnicy, które warto znać (każdy pilnuje decyzji, której łatwo nieświadomie złamać):
 
-## 4. Śledzenie jednej liczby od końca do początku
-
-Weźmy odpowiedź „teren skażony w Lęborku: 24,5% scenariuszy” (przebieg offline z tabeli w sekcji 0).
-
-1. **`app/city_query.py`** czyta wiersz z `gold.city_exposure` dla `lubiatowo_kopalino` + `Lębork`
-   + próg `cs137_contaminated`, zestaw `climatology`. Kolumna `p_exceed = 0.245`.
-2. **`gold/aggregates.py` → `build_city_exposure`**: dla komórki siatki, w której leży Lębork,
-   wziął wszystkie scenariusze (36 epizodo-wariantów × 30 próbek Q = 1080), policzył depozycję
-   `unit_dep_per_bq × Q` i zliczył, w ilu przekroczyła 37 kBq/m². 265 / 1080 = 24,5%.
-   Scenariusze, w których smuga nie doleciała, nie mają wierszy, ale liczą się do mianownika.
-3. **`silver.dispersion_episode`**: dla każdego scenariusza depozycja na 1 Bq uwolnienia
-   w tej komórce, zsumowana po 24 obłokach (godzinach uwolnienia) i ich odcinkach lotu.
-4. **`silver/puff.py` → `puff_unit_deposition`**:
-   - obłok z każdej godziny uwolnienia (masa = ułamek z `silver.release_schedule`) przesuwał się
-     co 15 min wiatrem z `silver.meteo`,
-   - dla każdego odcinka lotu, który przeszedł obok Lęborka, policzono σy/σz z przebytej drogi,
-     wzór gaussowski × ΔΦ oraz depozycję suchą i mokrą.
-5. **`silver.scenarios`**: epizod = losowy moment awarii z lat 2015–2024 (`silver/scenarios.py`).
-6. **`silver.meteo`** ← **`bronze.meteo`** ← plik JSON z Open-Meteo w `data/landing/meteo/lubiatowo_kopalino/`.
-
-To samo możesz prześledzić sam w terminalu:
-
-```bash
-radplume ask --site lubiatowo_kopalino --city Lębork    # odpowiedź + użyty SQL
-radplume show gold city_exposure -n 20                   # wiersz odpowiedzi
-radplume show silver scenarios -n 40                     # „przepisy” scenariuszy
-radplume show silver dispersion_episode -n 20            # wynik modelu przed nałożeniem Q
-radplume show silver meteo -n 24                         # pogoda godzina po godzinie
-```
-
-Powyższe liczby (24,5%, 1080) pochodzą z przebiegu offline (pogoda syntetyczna), więc na prawdziwej pogodzie będą inne.
-
----
-
-## 5. Testy jako przykłady użycia
-
-Każda funkcja transformacji ma test pokazujący, jak jej użyć na kilku wierszach. To najszybszy
-sposób, żeby zrozumieć fragment kodu: przeczytaj test, zmień w nim liczbę i uruchom go
-(`pytest tests/unit/test_physics.py -k mass_balance -v`).
-
-| Test | Pokazuje działanie |
+| Test | Pilnuje |
 |---|---|
-| `tests/unit/test_physics.py` | `silver/dispersion.py`: wzory, bilans masy, smuga tylko z wiatrem |
-| `tests/unit/test_puff.py` | `silver/puff.py`: Φ, zgodność ze smugą przy stałym wietrze, chmura skręcająca z wiatrem |
-| `tests/unit/test_scenarios.py` | `silver/scenarios.py`: harmonogram (przedziały → godziny, dwa zrzuty), plik walidacyjny, próbki Q |
-| `tests/unit/test_events.py` | `silver/events.py`: zapis wycieków, strefy czasowe, zespół członków |
-| `tests/unit/test_meteo.py` | `ingest/meteo.py` i `silver/meteo.py`: odrzucenie km/h, kierunek wiatru, klasy Pasquilla |
-| `tests/unit/test_sensor_dq.py` | `silver/sensor_clean.py` i `sensor_quality.py`: każdy typ usterki |
-| `tests/unit/test_sensor_sim_and_cdc.py` | `simulators/` i `silver/devices_cdc.py`: determinizm symulatora, SCD2 |
-| `tests/unit/test_guardrails_and_app.py` | `app/`: które zapytania SQL są blokowane |
-| `tests/unit/test_config.py` | `core/config.py`: środowiska, walidacja |
-| `tests/integration/test_pipeline.py` | cała ścieżka A: idempotencja, każde miasto ma odpowiedź, spójność progów |
-| `tests/integration/test_event.py` | `radplume event` end-to-end: dociągnięcie pogody, gold, klimatologia nietknięta |
+| `test_no_leakage_changing_tomorrow_changes_only_the_label` (`silver_transform/tests`) | zmiana danych z D+1 zmienia **tylko** etykietę, nie cechy |
+| `test_gbt_is_the_same_whatever_the_partitioning`, `test_float_noise_in_inputs_does_not_reach_the_model` (`model/tests`) | powtarzalność modelu między laptopem a klastrem |
+| `cli/tests/test_cli.py` | kolejności kroków w CLI = grafy tasków Jobów |
+| `core/tests/test_versions.py` | jedna wersja wszystkich wheeli; wheele nie ciągną PySparka na Databricks |
+| `test_integration.py` | cały potok na danych syntetycznych: warstwy, ponowne uruchomienie bez dubli, K1–K4, prognozy, usterki, CDC |
 
----
+Testy używają jednej sesji Sparka (`conftest.py`), a każdy test zapisujący tabele — własnego katalogu tymczasowego.
 
-## 6. Słowniczek
+## 9. Wdrożenie na Databricks
 
-| Pojęcie | Znaczenie w tym projekcie |
-|---|---|
-| **landing** | folder z plikami dokładnie takimi, jak przyszły ze źródła |
-| **bronze / silver / gold** | surowe tabele → oczyszczone i policzone → odpowiedzi na pytania |
-| **ops** | tabele operacyjne: odrzucone rekordy, metryki jakości |
-| **epizod** | jeden hipotetyczny moment awarii (start + 24 h uwolnienia) z prawdziwą pogodą z tamtego czasu |
-| **wariant fizyczny** | jedna wersja niepewnych parametrów modelu (stabilność ±1, depozycja, wysokość) |
-| **członek zespołu** | wariant w trybie zdarzenia: parametry fizyczne + zaburzenie wiatru (kierunek, prędkość); członek 0 = niezaburzony |
-| **próbka Q** | jedna możliwa ilość uwolnionego cezu/jodu |
-| **harmonogram uwolnienia** | jaki ułamek całkowitej ilości wychodzi w każdej godzinie (`release_fraction`, suma = 1) |
-| **scenariusz** | epizod × wariant × próbka Q |
-| **`scenario_set`** | `climatology` (losowe momenty z 10 lat, czyli „co jeśli”), `validation_2011` (prawdziwe daty Fukushimy) albo `event_…` (zdarzenie z `radplume event`) |
-| **obłok (puff)** | masa uwolniona w jednej godzinie, śledzona co 15 min wzdłuż trajektorii wyznaczanej przez zmienny wiatr |
-| **ΔΦ** | część obłoku, która „przeszła” obok komórki na danym odcinku trajektorii |
-| **unit deposition** | depozycja na 1 Bq całkowitego uwolnienia (rozłożonego wg harmonogramu); prawdziwa = unit × Q (model jest liniowy) |
-| **`p_exceed`** | odsetek scenariuszy, w których przekroczono próg |
-| **klasa Pasquilla** | stabilność atmosfery A (silne mieszanie) … F (bardzo stabilnie, wąska smuga) |
-| **SCD typ 2** | tabela z historią wersji rekordu (`valid_from`, `valid_to`) |
-| **lag** | `sent_at − event_time`: o ile spóźniony jest odczyt czujnika |
-| **reszta (residual)** | `ln(odczyt / przewidywanie modelu)`: ≈ 0 dla sprawnego czujnika |
+- [`databricks.yml`](../databricks.yml) — artefakty (po wheelu na paczkę krokową; bez `app`), targety `dev`
+  (`mode: development`) i `prod` (`mode: production`, `run_as` = service principal; wdraża tylko CI).
+- [`resources/job_smogcast.yml`](../resources/job_smogcast.yml) — Job batch: task = `python_wheel_task` z wheelem kroku
+  + `smogcast-core`, parametry `--step … --env ${var.env}`; klastry jednomaszynowe, typ maszyny z `var.node_type`.
+- [`resources/job_smogcast_live.yml`](../resources/job_smogcast_live.yml) — Job na żywo (co godzinę, harmonogram
+  wstrzymany).
+- [`sql/bootstrap_uc.sql`](../sql/bootstrap_uc.sql) — katalog, schematy, Volume'y (docelowo przejmuje to Terraform).
+- Co poprawiono przed pierwszym deployem i jak przebiegła walidacja na DEV:
+  [`poprawki-przed-deployem.md`](poprawki-przed-deployem.md), [`migracja-databricks.md`](migracja-databricks.md).
+
+## 10. Typowe zmiany — gdzie dotknąć
+
+| Chcę… | Zmień | Pamiętaj |
+|---|---|---|
+| dodać miasto | `cities.yaml` + `run.cities` w `conf/<env>.yaml` | stacje dobiorą się same; nowy `jurisdiction_code` = nowa grupa RLS w Terraformie |
+| dodać rok archiwum | `gios.yaml` (`yearly_file_ids`) + `run.archive_years` | sprawdź id po `Content-Disposition` ([`przygotowanie-danych.md`](przygotowanie-danych.md)) |
+| dodać krok | funkcja w `steps.py` + wpis w `STEPS` paczki + task w `resources/job_*.yml` + kolejność w `cli/main.py` | test zgodności CLI i Jobów |
+| dodać cechę modelu | `silver_transform/features.py`, `model.yaml`, `core/schema.py` | tylko informacja znana w D o 12:00 CET; ocena na nowym okresie, **nie** na 2025 |
+| zmienić próg normy | `thresholds.yaml` | zmienia etykiety → ponowny trening i backtest |
+| zmienić regułę jakości | `pm_dq.yaml` | demo usterek i test integracyjny pokażą skutek |
+| podnieść wersję | `VERSION` + wszystkie `packages/*/pyproject.toml` | pilnuje `test_versions.py` |

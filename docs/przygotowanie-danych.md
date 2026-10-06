@@ -1,336 +1,238 @@
-# Przygotowanie danych: co pobrać, jak przygotować i gdzie wrzucić
+# Przygotowanie danych: skąd, w jakim formacie i na co uważać
 
-Ten dokument opisuje wszystkie dane wejściowe projektu. Dla każdego zbioru znajdziesz:
-- czy pobiera się sam, czy trzeba go pobrać ręcznie,
-- skąd go wziąć,
-- do jakiego folderu go wrzucić,
-- jaki ma mieć format.
+> **Dla kogo:** każdy, kto uruchamia smogcast lokalnie albo na Databricks, i każdy, kto będzie zmieniał kroki `ingest`
+> i `bronze`. **Stan na:** 2026-10-06. Wszystkie formaty i pułapki niżej zostały sprawdzone na prawdziwych plikach
+> (szczegóły i daty w [`PLAN_SMOG.md`](../PLAN_SMOG.md), sekcja 4 i dziennik).
+> Poprzednia wersja tego dokumentu (radplume) leży w [`archive-radplume/`](archive-radplume/przygotowanie-danych.md).
 
-**Najważniejsze:** do podstawowego przebiegu (`radplume run-all`) **nie musisz
-niczego przygotowywać**. Pogodę i listę miast program pobiera sam. Ręcznie pobierasz
-tylko dane do **walidacji modelu na Fukushimie**, czyli do sprawdzenia, czy model
-wskazuje, gdzie i kiedy przeszła prawdziwa chmura.
+**Najważniejsze:** niczego nie pobierasz ręcznie. Każde źródło ma swój krok `ingest`, który pobiera dane, sprawdza je
+i zapisuje oryginał w strefie *landing*. Do testów i CI nie trzeba nawet internetu — generator syntetyczny zapisuje pliki
+w tych samych formatach (sekcja 8).
 
 ---
 
-## 1. Przegląd
+## 1. Przegląd źródeł
 
-| # | Dane | Po co | Kto pobiera | Folder | Status w kodzie |
+| # | Dane | Po co | Krok, który pobiera | Landing | Ścieżka potoku |
 |---|---|---|---|---|---|
-| A | Pogoda godzinowa (ERA5) | wiatr, opad, stabilność → smuga | **automatycznie** (`ingest-meteo`) | `data/landing/meteo/` | ✅ działa |
-| B | Miasta z populacją (GeoNames) | pytanie „czy miasto Y…” | **automatycznie** (`ingest-cities`) | `data/landing/cities/` | ✅ działa |
-| C | **Depozycja Cs-137 na gruncie** (JAEA) | walidacja: *gdzie* spadło skażenie | **Ty, ręcznie** | `data/landing/validation/deposition/` | ✅ działa (`radplume validation`) |
-| D | **Godzinowe stężenia Cs-137 w powietrzu** (SPM, Oura 2015) | walidacja: *kiedy i którędy* przeszła chmura | **Ty, ręcznie** | `data/landing/validation/air_concentration/` | 🔜 format ustalony, ingest w kolejnym kroku |
-| E | **Przebieg uwolnienia w czasie** (Katata 2015 / Terada 2020) | realny rozkład emisji zamiast równomiernego | **Ty, ręcznie** | `data/landing/source_term/` | ✅ działa (`radplume run-batch`) |
-| F | Pomiary wiatru ze stacji AMeDAS (opcjonalnie) | sprawdzenie, ile błędu wnosi ERA5 | **Ty, ręcznie** | `data/landing/meteo_obs/amedas/` | 🔜 opcjonalne |
-| G | Dokładne współrzędne Lubiatowa-Kopalina | poprawna lokalizacja źródła w PL | **Ty**, edycja pliku | `src/radplume/conf/sites.yaml` | ✅ wystarczy podmienić liczby |
-| H | Dokumenty do RAG (raporty, normy) | aplikacja AI: wyjaśnianie metodologii | **Ty, ręcznie** | `data/landing/documents/` | 🔜 blok 7 planu (Databricks) |
+| A | **Archiwum GIOŚ** — pomiary 1-godzinne PM10/PM2.5, roczne zip z xlsx (2021–2025) | historia: trening i backtest | `ingest gios-archive` | `gios_archive/raw/<rok>.zip` | A (batch) |
+| B | **Metadane GIOŚ** — stacje i stanowiska (xlsx), także zamknięte | przypisanie stacji do miast, stare kody | `ingest gios-archive` | `gios_archive/raw/metadata.xlsx` | A |
+| C | **Rejestr stacji z API GIOŚ** (`station/findAll` + `station/sensors`) | aktualne stanowiska do odpytywania; CDC/SCD2 | `ingest gios-registry` | `gios_registry/snapshot_<ts>.json` | C (CDC) |
+| D | **Pomiary na żywo z API GIOŚ** (`data/getData`) | cechy dnia dzisiejszego do prognozy na jutro | `ingest gios-live` | `gios_live/batch_<ts>.json` | B (strumień) |
+| E | **Archiwa prognoz pogody Open-Meteo** — `short_range` (od 2021) i `day_ahead` (od 2024-01-19) | cechy pogodowe „na jutro” w historii | `ingest weather-forecast-history` | `weather/<źródło>/<miasto>/<rok>.json` | A |
+| F | **Prognoza pogody na żywo** (Open-Meteo) | cechy pogodowe do prognozy na jutro | `ingest weather-forecast-live` | `weather/live/<miasto>/<ts>.json` | B |
+| G | **Odtworzenie z usterkami** — kopia prawdziwych pomiarów z `bronze.pm_hourly` + usterki | demo czyszczenia danych | `ingest fault-replay` | `fault_replay/`, `fault_replay_registry/` | B (osobny tor) |
+| H | **Dokumenty do bazy wiedzy** (rozporządzenie, dyrektywy UE, GIOŚ, WHO) | asystent (RAG) | `ingest rag-documents` | `rag/_zrodlo/` | aplikacja |
 
-**Kolejność, jeśli chcesz walidować model:** najpierw **E** (bez niego walidacja testuje
-głównie założenie o równomiernej emisji), potem **C** (główna metryka), potem **D**
-(test kierunku i czasu), a na końcu opcjonalnie **F**.
+Adresy, identyfikatory plików i listy zmiennych są w konfiguracji, nie w kodzie:
+[`gios.yaml`](../packages/core/src/smogcast/core/conf/gios.yaml), [`weather.yaml`](../packages/core/src/smogcast/core/conf/weather.yaml),
+[`cities.yaml`](../packages/core/src/smogcast/core/conf/cities.yaml), [`fault_injection.yaml`](../packages/core/src/smogcast/core/conf/fault_injection.yaml),
+[`app.yaml`](../packages/core/src/smogcast/core/conf/app.yaml) (źródła RAG).
 
----
+## 2. Gdzie lądują pliki
 
-## 2. Struktura folderów
-
-Folder `data/` powstaje w katalogu repozytorium przy pierwszym uruchomieniu i **nie
-trafia do gita** (jest w `.gitignore`: dane są duże i mają własne licencje).
-W Dockerze to ten sam folder na Twoim dysku, bo repozytorium jest zamontowane w kontenerze.
+Lokalnie wszystko jest w `data/` w katalogu repozytorium (w Dockerze to ten sam folder — repozytorium jest zamontowane).
+`data/` i `data-offline/` **nie trafiają do gita** (duże pliki, dane źródłowe mają własne zasady użycia).
+Na Databricks te same podfoldery leżą na Volume'ach Unity Catalog — kod się nie zmienia, zmienia się tylko korzeń ścieżki
+w `conf/<env>.yaml`.
 
 ```
-data/
-├── landing/                      ← strefa „surowa”: TU wrzucasz pliki
-│   ├── meteo/                    (A) automatycznie
-│   ├── cities/                   (B) automatycznie
-│   ├── validation/
-│   │   ├── deposition/           (C) *.csv — depozycja Cs-137
-│   │   │   └── _zrodlo/          oryginalne pliki pobrane z JAEA (program ich nie czyta)
-│   │   └── air_concentration/    (D) *.csv — stężenia godzinowe SPM
-│   │       └── _zrodlo/
-│   ├── source_term/              (E) *.csv — przebieg uwolnienia
-│   │   └── _zrodlo/
-│   ├── meteo_obs/amedas/         (F) *.csv — pomiary wiatru
-│   └── documents/                (H) PDF-y do RAG
-├── delta/                        ← tabele Delta (bronze/silver/gold/ops) — NIE edytuj ręcznie
-└── checkpoints/                  ← stan strumieni — NIE edytuj ręcznie
+data/                                   (Databricks: /Volumes/smogcast_<env>/raw/…)
+├── landing/                            → …/raw/landing      surowe pliki ze źródeł, nigdy nie edytowane
+│   ├── gios_archive/raw/               (A, B) <rok>.zip, metadata.xlsx — oryginały z GIOŚ
+│   ├── gios_archive/long/              pamięć podręczna: <rok>_<PM10|PM25>_1g.csv.gz (format długi, sekcja 3)
+│   ├── gios_registry/                  (C) migawki rejestru
+│   ├── gios_live/                      (D) paczki odpytań API
+│   ├── weather/{short_range,day_ahead,live}/<miasto>/   (E, F)
+│   ├── fault_replay/, fault_replay_registry/            (G)
+│   └── rag/_zrodlo/                    (H) oryginały dokumentów
+├── delta/<warstwa>/<tabela>/           → tabele smogcast_<env>.<warstwa>.<tabela>   NIE edytuj ręcznie
+├── checkpoints/                        → …/raw/checkpoints  stan strumieni           NIE edytuj ręcznie
+└── models/                             → …/raw/models       zapisane modele MLlib, indeks RAG
 ```
 
-Utworzenie folderów w PowerShellu (w katalogu repozytorium):
+Zasada z `CLAUDE.md`: jeśli kiedyś trzeba coś pobrać ręcznie, oryginał trafia do podfolderu `_zrodlo/`, a program czyta
+dopiero plik przygotowany obok.
 
-```powershell
-$dirs = "validation/deposition/_zrodlo", "validation/air_concentration/_zrodlo",
-        "source_term/_zrodlo", "meteo_obs/amedas", "documents"
-foreach ($d in $dirs) { New-Item -ItemType Directory -Force -Path "data/landing/$d" | Out-Null }
-```
+## 3. Archiwum GIOŚ (A) i metadane (B)
 
-**Zasada `_zrodlo/`:** oryginalny plik zawsze zostaw nietknięty w podfolderze `_zrodlo/`,
-a obok zapisz przekształcony CSV w formacie z tego dokumentu. Program czyta tylko pliki
-`*.csv` leżące bezpośrednio w folderze, więc nie weźmie oryginału. Zawsze da się wtedy
-sprawdzić, skąd wzięła się liczba (plan: „każdy wiersz da się prześledzić do źródła”).
+**Skąd:** https://powietrze.gios.gov.pl/pjp/archives → „Przygotowane dane do pobrania”, pobieranie
+`…/pjp/archives/downloadFile/<id>`. Identyfikatory w `gios.yaml` (`yearly_file_ids`, `metadata_file_id`).
 
-Tryb `--offline` używa osobnego katalogu `data-offline/`. Dane walidacyjne wrzucaj do
-`data/`, bo walidacja ma sens tylko z prawdziwą pogodą.
+| Rok | id | | Plik | id |
+|---|---|---|---|---|
+| 2021 | 486 | | Metadane — stacje i stanowiska | 643 |
+| 2022 | 524 | | | |
+| 2023 | 564 | | | |
+| 2024 | 582 | | | |
+| 2025 | 644 | | | |
 
----
+**Pułapka 1 — etykiety na stronie są przesunięte względem linków.** Link podpisany „2024” może prowadzić do innego
+roku. Identyfikatory sprawdzono po nazwie pliku z nagłówka `Content-Disposition`, a krok `gios-archive` **sprawdza ją
+przy każdym pobraniu** (w nazwie musi być żądany rok albo „Metadane”) i przerywa, zamiast zapisać zły plik. Przy
+dodawaniu kolejnego roku: `curl -sI <adres>` i sprawdź `Content-Disposition`.
 
-## 3. Wspólne zasady formatu CSV (ważne przy Excelu z polskimi ustawieniami)
+**Zawartość zip:** m.in. `2025_PM10_1g.xlsx`, `2025_PM25_1g.xlsx` (automatyczne, godzinowe) oraz `…_24g.xlsx`
+(manualne, dobowe). **Używamy tylko `_1g`** — średnie dobowe liczymy sami (reguła 18 h). Uwaga na nazwę: w plikach
+archiwum `PM25`, w API `PM2.5` (`archive_token` vs `gios_code` w `cities.yaml`).
 
-Każdy plik, który przygotowujesz, musi spełniać te zasady:
+**Format arkusza `<rok>_PM10_1g.xlsx` — szeroki:**
 
-| Zasada | Dlaczego |
+| Wiersz | Zawartość |
 |---|---|
-| separator kolumn: **przecinek** `,` | polski Excel domyślnie zapisuje średnik `;`, więc kolumny się skleją |
-| separator dziesiętny: **kropka** `1234.5` | polski Excel zapisuje `1234,5`, a Spark wczyta to jako tekst albo NULL |
-| pierwszy wiersz: **nagłówek** z nazwami kolumn jak w tym dokumencie | kod szuka kolumn po nazwach |
-| kodowanie: **UTF-8** | japońskie nazwy stacji i polskie znaki |
-| czas: **UTC**, format `2011-03-15T06:00:00` | źródła japońskie podają czas **JST = UTC+9**; trzeba **odjąć 9 godzin** |
-| współrzędne: stopnie dziesiętne WGS84 (`37.4213`, `141.0325`) | nie stopnie-minuty-sekundy |
-| jednostki: dokładnie te z opisu kolumny | np. kBq/m², a nie Bq/m² |
+| 1–6 | nagłówek: `Nr`, `Kod stacji`, `Wskaźnik`, `Czas uśredniania`, `Jednostka` (`ug/m3`), `Kod stanowiska` |
+| 7… | `datetime` + po jednej kolumnie na stanowisko (~185 kolumn PM10), ~8760 wierszy (8784 w roku przestępnym) |
 
-Jak zapisać poprawny CSV z Excela: *Plik → Zapisz jako → „CSV UTF-8 (rozdzielany przecinkami)”*.
-Wcześniej ustaw w Windows (*Ustawienia regionalne → Dodatkowe ustawienia*) separator
-dziesiętny na kropkę i separator listy na przecinek. Prostsza alternatywa to przekształcenie
-w Pythonie: `pandas.read_excel(...)` → `.to_csv(..., index=False)`.
+- **Nagłówek znajdujemy po etykiecie** „Kod stanowiska”, nie po numerze wiersza. Polskie etykiety nagłówków to
+  **kontrakt** w [`smogcast.core.schema`](../packages/core/src/smogcast/core/schema.py) — porównywane znak po znaku,
+  więc **nie tłumaczyć ich** na angielski (z tego samego kontraktu korzysta generator syntetyczny).
+- **Znacznik czasu = KONIEC godziny w CET** (UTC+1 przez cały rok, bez czasu letniego): `2025-01-01 01:00` to godzina
+  00:00–01:00 CET.
+- **Szum w znacznikach:** Excel dokłada ok. +5 ms na wiersz (do ~44 s pod koniec roku, np. `03:00:00.005`) →
+  zaokrąglamy do **najbliższej** pełnej godziny (`timeutil.round_to_hour`).
+- **Puste komórki = brak pomiaru** — pomijane i liczone w metrykach; przecinek dziesiętny i śmieci w komórkach obsłużone.
+- **Pamięć:** arkusz ma ~1,6 mln komórek. Czytamy go strumieniowo (`openpyxl`, `read_only=True`, wiersz po wierszu)
+  i zapisujemy do `gios_archive/long/<rok>_<PM>_1g.csv.gz` (`position_code,time_cet_end,value`) — dalej czyta to już Spark.
+  Ten CSV to pamięć podręczna: usunięcie go wymusza ponowną konwersję z xlsx.
 
-Najczęstszy błąd w danych z Japonii to czas. Pomiar z „2011-03-15 15:00 JST” to
-`2011-03-15T06:00:00` UTC. Pomyłka o 9 godzin przypisze chmurę do zupełnie innego
-wiatru, a walidacja wyjdzie fatalna bez winy modelu.
+**Metadane (`metadata.xlsx`):** arkusze stacji i stanowisk. Zawierają **także stacje zamknięte** (miejscowość,
+współrzędne, daty działania), których API już nie zna — bez nich nie przypisalibyśmy do miast starszych pomiarów.
 
----
+- **Stare kody stacji:** stacje zmieniały kody; archiwum z danego roku używa kodu z tamtego czasu. Kolumna
+  „Stary Kod stacji” może mieć **kilka kodów** naraz (rozdzielane przecinkiem lub średnikiem) — każdy dostaje własny
+  wiersz w `silver.station_city`, wskazujący dzisiejszy kod.
+- **Puste napisy zamiast dat** w arkuszu stanowisk → `try_cast` + pusty napis jako NULL.
+- **Wiersze krótsze niż nagłówek** (puste końcowe komórki xlsx nie są zapisywane) — brakujące kolumny parser traktuje
+  jako puste (błąd wykryty w E8 testem integracyjnym).
+- **8 kodów z pomiarów nie ma w metadanych** — to stacje mobilne (`…MOB`) i małe miejscowości spoza 10 miast; bez wpływu
+  na wynik.
 
-## 4. Szczegóły dla każdego zbioru
+**Skala:** 2021–2025 = **11,4 mln** wartości godzinowych (wszystkie stacje Polski), ok. 320 MB zip. Po zawężeniu do
+10 miast: 149 stacji (+53 stare kody), 2,1 mln godzin. Archiwum jest zweryfikowane przez GIOŚ i bardzo czyste
+(0 wartości ujemnych, 3 powyżej 1000 µg/m³, ok. 8 tys. zer) — stąd osobne demo usterek (G).
 
-### A. Pogoda (ERA5 przez Open-Meteo): automatycznie
+## 4. API GIOŚ v1 (C, D)
 
-- **Nic nie robisz.** `radplume ingest-meteo` pobiera dane sam, a pobrane lata zostają w cache.
-- To **prawdziwa** pogoda: reanaliza ERA5, czyli pomiary połączone modelem pogody w siatkę ok. 25 km.
-- Zakres jest w `src/radplume/conf/local.yaml` (`climatology.meteo_range`) i w `sites.yaml`
-  (`validation.meteo_range` = 11–20 marca 2011 dla Fukushimy).
-- Chcesz pobrać dane od nowa? Usuń plik z `data/landing/meteo/<lokalizacja>/`.
+**Baza:** `https://api.gios.gov.pl/pjp-api/v1/rest` (dokumentacja: https://api.gios.gov.pl/pjp-api/swagger-ui/).
+**Stare API** `/pjp-api/rest/...` zwraca **410 Gone** — w starszych poradnikach w internecie jest właśnie ono.
 
-### B. Miasta (GeoNames): automatycznie
-
-- **Nic nie robisz.** `radplume ingest-cities` pobiera `cities5000.zip`
-  (miejscowości ≥ 5000 mieszkańców, licencja CC BY 4.0).
-
----
-
-### C. Depozycja Cs-137 na gruncie (JAEA EMDB) ✅
-
-**Po co:** główny test modelu. Porównuje, **ile cezu spadło w danym miejscu**, z tym, co
-przewiduje model dla epizodu walidacyjnego `validation_2011`. Wynik to FAC2, FAC5 i pokrycie przedziału P5–P95.
-
-**Skąd:** [JAEA — Database for Radioactive Substance Monitoring Data (EMDB)](https://emdb.jaea.go.jp/emdb/)
-- pomiary lotnicze (Airborne Monitoring, MEXT/DOE): mapa depozycji Cs-137, najlepsze pokrycie terenu,
-- [pomiary gleby z 2200 punktów](https://emdb.jaea.go.jp/emdb_old/en/portals/1020101001/) (MEXT, czerwiec 2011): dokładniejsze punktowo.
-
-**Na co uważać:**
-- **Data korekty rozpadu.** JAEA przelicza wartości na konkretny dzień, np. 14.06.2011 dla gleby
-  albo 11.03.2013 dla części pomiarów lotniczych. Używaj **tylko Cs-137**: przez 2 lata ubywa go
-  ok. 4,5%, co wobec niepewności modelu (×5) nie ma znaczenia. **Nie używaj Cs-134** (połowa
-  rozpada się w 2 lata) ani sumy „Cs-134+137”.
-- **Jednostki.** JAEA podaje zwykle Bq/m² albo kBq/m². Kolumna `measured_kbq_m2` musi być w **kBq/m²**
-  (Bq/m² ÷ 1000).
-- **Zasięg.** Model liczy ±100 km od elektrowni (lokalnie siatka 41 × 5 km). Punkty dalej są pomijane.
-- **Liczba punktów.** Wystarczy kilkaset do kilku tysięcy. Nie ma sensu wrzucać milionów pikseli mapy lotniczej.
-
-**Gdzie:** `data/landing/validation/deposition/jaea_cs137.csv` (nazwa dowolna, rozszerzenie `.csv`)
-
-**Format:**
-
-| Kolumna | Typ | Opis |
+| Endpoint | Użycie | Uwagi |
 |---|---|---|
-| `site_id` | tekst | zawsze `fukushima_daiichi` |
-| `lat` | liczba | szerokość geograficzna punktu pomiaru (WGS84) |
-| `lon` | liczba | długość geograficzna |
-| `nuclide` | tekst | zawsze `Cs-137` |
-| `measured_kbq_m2` | liczba | depozycja w kBq/m² |
-| `source` | tekst | skąd pomiar, np. `JAEA-soil-2011-06` albo `JAEA-airborne-4th` |
+| `GET /station/findAll?size=500` | rejestr stacji (C) | JSON-LD z **polskimi nazwami pól** (`Kod stacji`, `Nazwa miasta`, `WGS84 φ N`…), stronicowanie `page`/`size`; współrzędne jako **tekst** |
+| `GET /station/sensors/{stationId}` | stanowiska stacji (C) | `Wskaźnik - kod` = `PM10` / `PM2.5` |
+| `GET /data/getData/{idSensor}?size=500` | pomiary na żywo (D) | `Data` = **koniec godziny w czasie lokalnym** (Europe/Warsaw, **z czasem letnim**); wartości bywają `null` |
+| `GET /archivalData/getDataBySensor/{idSensor}` | zapas dla archiwum | ta sama konwencja czasu co `getData` (sprawdzone: zimą zwraca dokładnie wartości i znaczniki archiwum) |
+| `GET /levels/getPermissible` | weryfikacja progów | PM10 `standardValue` 50.5, `acceptNumber` 35 |
 
-```csv
-site_id,lat,lon,nuclide,measured_kbq_m2,source
-fukushima_daiichi,37.6680,140.7290,Cs-137,512.3,JAEA-soil-2011-06
+**Format paczki na żywo** (`gios_live/batch_<ts>.json`) — po jednej na odpytanie:
+
+```json
+{"source": "live", "fetched_at": "2026-10-01T14:25:26+00:00", "previous_fetched_at": "2026-10-01T14:19:12+00:00",
+ "records": [{"position_code": "DsWrocWybCon-PM2.5-1g", "station_code": "DsWrocWybCon", "pollutant": "PM2.5",
+              "sensor_id": 670, "time_local_end": "2026-10-01 16:00:00", "value": 16.4,
+              "sent_at": "2026-10-01T14:25:26+00:00"}, …]}
 ```
-*(wiersz ilustruje format, to nie jest prawdziwy pomiar)*
 
-**Uruchomienie:** `radplume validation`, a wynik w `radplume show gold validation`.
+Pułapki API:
+- **`getData` zwraca ok. 3 ostatnie doby przy każdym odpytaniu.** Duplikaty są normą, a nie błędem — deduplikacja po
+  (źródło, stanowisko, godzina). „Spóźniony” odczyt to nie każdy stary odczyt, tylko taki, który **powinien był
+  przyjść już przy poprzednim odpytaniu** (stąd `previous_fetched_at` w paczce) i ma opóźnienie > 3 h.
+- **API nie służy do historii** — trzyma za mało dni. Historia (Job batch) pochodzi z archiwum xlsx.
+- **Puste wartości** w ostatnich godzinach są częste (4–6% odczytów na żywo) → kwarantanna `missing_value`, a przy
+  kolejnym odpytaniu wartość uzupełniona przez GIOŚ jest oceniana ponownie.
+- **Stanowiska manualne** (33 z 134 w 10 miastach) nie mają danych godzinowych na żywo — pomijane.
+- **Zbiór stacji na żywo ≠ historia:** rejestr API zna nowe stacje (np. Warszawa 8 vs 6 stacji PM10). Przy definicji
+  „miasto = najgorsza stacja” cechy na żywo mogą być nieco wyższe niż w treningu (ograniczenie opisane w ARCHITECTURE).
 
----
+## 5. Pogoda — Open-Meteo (E, F)
 
-### D. Godzinowe stężenia Cs-137 w powietrzu (stacje SPM) 🔜
+Model musi widzieć **prognozę** pogody na jutro, nigdy pogodę, która faktycznie wystąpiła (decyzja D7) — inaczej
+backtest byłby zawyżony. Stąd trzy źródła (`weather.yaml`):
 
-**Po co:** sprawdza, **kiedy i którędy** przeszła chmura. W Japonii działa ponad 400 stacji
-monitoringu pyłu zawieszonego (SPM). Ich taśmy filtracyjne wymieniano co godzinę i przechowano,
-a naukowcy zmierzyli na nich cez z 99 stacji za każdą godzinę 12–23 marca 2011.
-To najlepszy zbiór do sprawdzenia, czy model wysyła smugę we właściwą stronę o właściwej godzinie.
+| Źródło | API | Od | Użycie | Charakter |
+|---|---|---|---|---|
+| `short_range` | `historical-forecast-api.open-meteo.com/v1/forecast` | 2021 | **trening** 2021–2023 | sklejane najświeższe prognozy (kilka godzin wyprzedzenia) — trochę lepsze niż prawdziwa prognoza „na jutro” |
+| `day_ahead` | `previous-runs-api.open-meteo.com/v1/forecast`, zmienne `<nazwa>_previous_day1` | **2024-01-19 12:00 UTC** | **walidacja 2024 i test 2025** | prawdziwe prognozy wydane dzień wcześniej; wcześniejsze godziny wracają jako `null` |
+| `live` | `api.open-meteo.com/v1/forecast` | — | prognoza na jutro | najnowsza dostępna prognoza |
 
-**Skąd:**
-- baza: [Oura i in. 2015, „A Database of Hourly Atmospheric Concentrations of Radiocesium…”, J. Nucl. Radiochem. Sci.](https://www.jstage.jst.go.jp/article/jnrs/15/2/15_2_1/_article). Dane są w materiałach uzupełniających artykułu,
-- metoda i opis zdarzeń: [Tsuruta i in. 2014, Scientific Reports](https://pmc.ncbi.nlm.nih.gov/articles/PMC5381196/).
+Zmienne godzinowe (te same we wszystkich źródłach): `temperature_2m`, `relative_humidity_2m`, `wind_speed_10m`,
+`wind_direction_10m`, `precipitation`, `surface_pressure`, `cloud_cover`, `shortwave_radiation`.
 
-**Na co uważać:**
-- czas w źródle jest w **JST**, więc odejmij 9 h,
-- wartości poniżej progu detekcji oznacz w `below_detection = true`, nie wpisuj zera,
-- stężenia są w **Bq/m³**.
+Pułapki:
+- **Jednostki i strefa wymuszane w żądaniu** (`wind_speed_unit=ms`, `timezone=GMT`) i **sprawdzane w odpowiedzi** —
+  domyślnie Open-Meteo podaje wiatr w km/h. Sprawdzane są też długości tablic.
+- **`boundary_layer_height` jest pusta** w archiwum prognoz — nie używamy (dlatego inwersja w
+  `docs/ulepszenia-pm10.md` jest liczona z temperatur).
+- Przyrostek `_previous_day1` jest zdejmowany w bronze → jeden schemat `bronze.weather_forecast` dla wszystkich źródeł.
+- **Odpowiedź, która nie jest JSON-em** (zdarza się przy limicie zapytań — wyszło dopiero na Databricks, gdzie wszystkie
+  pliki pobierały się od zera w jednym przebiegu; lokalnie leżały już w pamięci podręcznej): traktowana jak błąd
+  przejściowy (`NotJsonResponse`), 6 prób z przerwami 5–80 s.
+- **Pamięć podręczna:** zakończone lata nie są pobierane drugi raz; bieżący rok — za każdym razem.
+- Różnica jakości źródeł w tych samych dniach jest mała (MAE temperatury dobowej 0,40°C, wiatru 0,21 m/s), więc trening na
+  `short_range` niewiele zawyża.
+- Dane Open-Meteo są na licencji **CC BY 4.0** — przy publikacji wyników trzeba podać źródło.
 
-**Gdzie:** `data/landing/validation/air_concentration/spm_oura2015.csv`
+## 6. Czas — jedna konwencja w tabelach
 
-**Format:**
+Każde źródło stempluje godzinę inaczej. Konwersje są **tylko** w
+[`smogcast.core.timeutil`](../packages/core/src/smogcast/core/timeutil.py) (z testami); w tabelach zawsze
+`time_utc` = **początek** godziny w UTC, a doba średniej dobowej to `day_cet` (dzień kalendarzowy w CET — tak liczy GIOŚ).
 
-| Kolumna | Typ | Opis |
+| Źródło | Znacznik w źródle | Przykład → `time_utc` |
 |---|---|---|
-| `station_id` | tekst | identyfikator stacji ze źródła |
-| `station_name` | tekst | nazwa (może być po japońsku) |
-| `lat`, `lon` | liczba | położenie stacji (WGS84) |
-| `time_start_utc` | czas | początek godziny poboru, **UTC** |
-| `time_end_utc` | czas | koniec godziny poboru, **UTC** |
-| `nuclide` | tekst | `Cs-137` |
-| `concentration_bq_m3` | liczba | stężenie w Bq/m³ (puste, jeśli poniżej detekcji) |
-| `below_detection` | `true`/`false` | czy poniżej progu wykrywalności |
-| `source` | tekst | np. `Oura2015` |
+| archiwum GIOŚ | koniec godziny, **CET** (UTC+1 cały rok) | `2025-01-01 01:00` → `2024-12-31 23:00` |
+| API GIOŚ (`getData`, `archivalData`) | koniec godziny, **czas lokalny** (lato: UTC+2) | `2026-10-01 16:00` (CEST) → `2026-10-01 13:00` |
+| Open-Meteo | początek godziny, UTC (`timezone=GMT`) | bez zmian |
 
-```csv
-station_id,station_name,lat,lon,time_start_utc,time_end_utc,nuclide,concentration_bq_m3,below_detection,source
-FKS-001,Futaba,37.4500,141.0120,2011-03-15T00:00:00,2011-03-15T01:00:00,Cs-137,123.4,false,Oura2015
-```
-*(wiersz ilustruje format, to nie jest prawdziwy pomiar)*
+- **Jesienna zmiana czasu:** jedna godzina lokalna występuje dwa razy; `zoneinfo` bierze pierwsze wystąpienie — jedna
+  niejednoznaczna godzina w roku, zaakceptowane.
+- Dzień wydania prognozy „dziś” to dzień w CET (`timeutil.issue_day_cet`); zmienna `SMOGCAST_ISSUE_DATE` pozwala
+  odtworzyć wybrany dzień w testach i na demo.
+- Procesy działają w strefie UTC (`TZ=UTC` w Dockerze i CI, sesja Sparka w UTC) — tak samo jak na klastrze.
 
-**Status:** format jest ustalony. Kod zapisujący godzinowe stężenia modelu w punktach stacji
-i tabela `gold.validation_air` powstaną w kolejnym kroku. Model obłoków liczy już czas przejścia
-chmury wzdłuż trajektorii, więc brakuje tylko zapisu stężeń w punktach stacji. Możesz już przygotować plik.
+## 7. Stacje → miasta
 
----
+Nie ma listy stacji na sztywno. Stacja należy do miasta, gdy jej miejscowość z metadanych GIOŚ (B) albo `Nazwa miasta`
+z rejestru API (C) jest równa `gios_city_name` z `cities.yaml`. Nowe stacje pojawiają się więc same. Każde z 10 miast
+ma kod województwa (`jurisdiction_code`, np. `PL-12`) — to klucz pod RLS (decyzja D12).
 
-### E. Przebieg uwolnienia w czasie (source term) ✅
+## 8. Dane syntetyczne (testy, CI, `--offline`)
 
-**Po co:** bez tego pliku epizod walidacyjny zakłada, że przez 96 h uwalniało się równo tyle samo
-co godzinę. W rzeczywistości emisja szła w kilku krótkich zrzutach (m.in. popołudnie 12 marca,
-noc 14/15, poranek i noc 15, poranek 16 marca), a mapa skażenia zależy od tego, na jaki wiatr
-i deszcz trafił każdy zrzut. **Bez tego pliku walidacja C i D będzie zaniżona z powodu
-założenia, a nie z powodu fizyki.**
+[`smogcast.ingest.synthetic`](../packages/ingest/src/smogcast/ingest/synthetic.py) zapisuje **te same pliki co prawdziwe
+źródła** (zip z arkuszami xlsx GIOŚ, metadane, migawki rejestru, paczki `getData`, JSON-y Open-Meteo dla trzech źródeł),
+więc kroki `bronze` i dalsze nie wiedzą, że dane są sztuczne. Włączane przez `sources: synthetic` (konfiguracja testów)
+albo `smogcast --offline …` (osobny katalog `data-offline/`, 2 miasta, małe siatki modelu).
 
-**Skąd:**
-- [Katata i in. 2015, Atmos. Chem. Phys. 15, 1029–1070](https://acp.copernicus.org/articles/15/1029/2015/): tabela tempa uwolnienia Cs-137 i I-131 w czasie (artykuł open access),
-- alternatywnie: [Terada i in. 2020, J. Environ. Radioact.](https://www.sciencedirect.com/science/article/pii/S0265931X19304473), nowsza wersja szacunków.
+- Wartości są czystymi funkcjami (ziarno, stacja, czas) — każdy przebieg daje to samo.
+- Jedna ukryta „prawdziwa pogoda” na miasto; PM od niej zależy, prognozy = prawda + błąd (`forecast_error` w
+  [`synthetic.yaml`](../packages/core/src/smogcast/core/conf/synthetic.yaml)) — więc model ma czego się nauczyć.
+- Generowane są tylko miesiące sezonu grzewczego (żeby każdy podział miał dni z przekroczeniem) i 1% pustych wartości
+  (jak w prawdziwym GIOŚ).
+- **Nigdy nie mieszają się z prawdziwymi danymi** i nie służą do oceny modelu — tylko do sprawdzenia, że potok działa.
 
-**Na co uważać:**
-- sprawdź w tabeli jednostkę (zwykle Bq/h) i strefę czasową (zwykle **JST**, więc odejmij 9 h),
-- przedziały czasu mogą mieć różną długość (np. 3 h, 30 min). Wpisz je tak, jak są w źródle,
-  bo kod rozłoży je na godziny,
-- kolumnę `release_height_m` możesz wypełnić dla porządku, ale model jej jeszcze nie używa:
-  wysokość uwolnienia pochodzi z wariantów w `sites.yaml` (`release_height_m: [min, centralna, max]`),
-- okno epizodu to `validation.episode_start` + `episode_hours` w `sites.yaml`
-  (12.03.2011 06:00 UTC + 96 h). Uwolnienie poza oknem jest pomijane, a w logu pojawia się
-  ostrzeżenie z odsetkiem pominiętej ilości. Chcesz uwzględnić więcej? Wydłuż okno w `sites.yaml`
-  i poszerz `validation.meteo_range`.
+## 9. Odtworzenie z usterkami (G)
 
-**Gdzie:** `data/landing/source_term/fukushima_2011_katata2015.csv`
+Kopia **prawdziwych** pomiarów z `bronze.pm_hourly` dla okna z `fault_injection.yaml` (Kraków, 17–21.01.2025 — w tym
+prawdziwy epizod smogowy 20.01), zapisana w formacie paczek API (D) i zepsuta według harmonogramu: awaria łączności,
+duplikat paczki, wartość ujemna i > 1000, pusta wartość, zamrożony odczyt, skok, dryf, zmiana rejestru. Osobny folder,
+`source = 'fault_replay'`, osobne tabele strumienia — **nigdy nie trafia do danych modelu** (decyzja D17).
+Wymaga wcześniej wypełnionego `bronze.pm_hourly` (Job batch). Scenariusz: [`demo-jakosc-danych.md`](demo-jakosc-danych.md).
 
-**Format:**
+## 10. Dokumenty bazy wiedzy (H)
 
-| Kolumna | Typ | Opis |
-|---|---|---|
-| `site_id` | tekst | `fukushima_daiichi` |
-| `nuclide` | tekst | `Cs-137` albo `I-131` |
-| `time_start_utc` | czas | początek przedziału, **UTC** |
-| `time_end_utc` | czas | koniec przedziału, **UTC** |
-| `release_rate_bq_h` | liczba | tempo uwolnienia w Bq/h |
-| `release_height_m` | liczba (opcjonalnie) | wysokość uwolnienia |
-| `source` | tekst | np. `Katata2015-Table` |
+Lista źródeł z uzasadnieniem: [`rag-dokumenty.md`](rag-dokumenty.md). W skrócie: oryginały pobierane do
+`rag/_zrodlo/`, a każde pobranie sprawdza format (portale potrafią odpowiedzieć stroną HTML z captchą pod adresem
+`.pdf` — taki plik jest odrzucany). EUR-Lex blokuje automaty, więc akty UE pochodzą z repozytorium Urzędu Publikacji
+(Cellar); pełnych wytycznych WHO 2021 nie da się pobrać automatycznie. Polskie źródła weszły do indeksu jako
+nieoficjalne tłumaczenia fragmentów (`docs/rag/`).
 
-```csv
-site_id,nuclide,time_start_utc,time_end_utc,release_rate_bq_h,release_height_m,source
-fukushima_daiichi,Cs-137,2011-03-12T06:00:00,2011-03-12T07:00:00,1.0e+13,120,Katata2015
-```
-*(wiersz ilustruje format, to nie są wartości z publikacji)*
+## 11. Lista kontrolna przy zmianie źródła
 
-**Co robi program z tym plikiem** (`radplume run-batch`, kroki `bronze` i `silver`):
-1. `bronze.source_term`: plik wczytany bez zmian.
-2. Przedziały są rozkładane na pełne godziny okna epizodu, proporcjonalnie do czasu nakładania się.
-3. Całkowita ilość w oknie staje się medianą ilości dla `validation_2011` (niepewność
-   `validation.source_term_gsd`, domyślnie ×/÷ 2). Ułamki godzinowe trafiają do `silver.release_schedule`.
-4. Nuklid, którego nie ma w pliku (np. podasz tylko Cs-137), dostaje ilość z `sites.yaml`
-   i ten sam profil czasowy.
-
-Sprawdzenie: `radplume show silver release_schedule` i `radplume show silver source_terms`.
-Kolumna `source = file` oznacza dane z pliku, a `config_uniform` oznacza, że pliku nie znaleziono.
-
----
-
-### F. Pomiary wiatru ze stacji AMeDAS (opcjonalnie) 🔜
-
-**Po co:** porównanie wiatru z ERA5 (siatka 25 km) z pomiarami ze stacji w terenie. Pokazuje,
-ile błędu wnosi samo wejście meteo. Przydaje się do write-upu („ograniczenia”).
-
-**Skąd:** [JMA AMeDAS](https://www.jma.go.jp/jma/en/Activities/amedas/amedas.html). Dane historyczne
-są w serwisie „過去の気象データ・ダウンロード” (Past Weather Data Download) na stronie JMA.
-Istotne stacje to m.in. Namie (浪江) i Iitate (飯舘), zakres 11–20.03.2011, dane godzinowe.
-
-**Na co uważać:**
-- czas w **JST**, więc odejmij 9 h,
-- kierunek wiatru jest zapisany **słownie po japońsku w 16 kierunkach** (np. 北北西 = NNW),
-  a trzeba go zamienić na stopnie (N = 0°, NNE = 22,5°, …, NNW = 337,5°),
-- to kierunek, **z którego** wieje wiatr (tak samo jak w ERA5), więc nie dodawaj 180°.
-
-**Gdzie:** `data/landing/meteo_obs/amedas/amedas_2011-03.csv`
-
-**Format:** `station_id, station_name, lat, lon, time_utc, wind_speed_ms, wind_from_deg, precip_mm_h, source`
-
----
-
-### G. Dokładne współrzędne Lubiatowa-Kopalina ✅
-
-To nie jest plik do wrzucenia, tylko **edycja konfiguracji**. Obecne współrzędne są przybliżone,
-bo test API zwrócił `elevation: 0.0`, czyli linię brzegową (plan, P21).
-
-1. Znajdź współrzędne terenu elektrowni w dokumentach Polskich Elektrowni Jądrowych
-   (decyzja środowiskowa / raport OOŚ dla lokalizacji Lubiatowo-Kopalino).
-2. Otwórz `src/radplume/conf/sites.yaml` i w sekcji `lubiatowo_kopalino` podmień `lat` i `lon`.
-3. Usuń stare dane pogodowe dla tej lokalizacji: folder `data/landing/meteo/lubiatowo_kopalino/`.
-4. Uruchom `radplume run-batch`. W logu kroku `silver` nie powinno być ostrzeżenia
-   `grid_elevation ≤ 0`.
-
----
-
-### H. Dokumenty do RAG 🔜
-
-Na etap aplikacji AI na Databricks (plan 4.8, blok 7). Nie jest potrzebny do lokalnego PoC.
-Do `data/landing/documents/` wrzucaj PDF-y, na które aplikacja ma się powoływać:
-- raport WMO Task Team (2013) — [„Evaluation of Meteorological Analyses for the Radionuclide Dispersion and Deposition from the Fukushima Daiichi NPP Accident”](https://www.researchgate.net/publication/259970914_Evaluation_of_Meteorological_Analyses_for_the_Radionuclide_Dispersion_and_Deposition_from_the_Fukushima_Daiichi_Nuclear_Power_Plant_Accident),
-- [UNSCEAR 2020/2021, tom II, Aneks B](https://www.unscear.org/unscear/en/publications/2020_2021_2.html), m.in. [załącznik A-10](https://www.unscear.org/unscear/uploads/documents/publications/UNSCEAR_2020_21_Annex-B_Attach_A-10.pdf) o modelowaniu transportu,
-- Katata i in. 2015 (jak w E),
-- dokumenty IAEA/ICRP o progach skażenia i dawek.
-
-Te raporty warto przeczytać także do write-upu. Raport WMO porównuje 5 profesjonalnych modeli
-z pomiarami i daje punkt odniesienia dla Twojego wyniku.
-
----
-
-## 5. Lista kontrolna
-
-- [ ] (G) podmieniłem współrzędne Lubiatowa w `sites.yaml` i usunąłem stare meteo tej lokalizacji
-- [ ] (E) przebieg uwolnienia z Katata 2015 → `data/landing/source_term/*.csv`, czas w UTC
-- [ ] (C) depozycja Cs-137 z JAEA → `data/landing/validation/deposition/*.csv`, kBq/m², tylko Cs-137
-- [ ] (D) stężenia godzinowe SPM (Oura 2015) → `data/landing/validation/air_concentration/*.csv`, czas w UTC
-- [ ] (F, opcjonalnie) wiatr AMeDAS → `data/landing/meteo_obs/amedas/*.csv`, kierunek w stopniach
-- [ ] oryginały zostawione w `_zrodlo/`
-- [ ] CSV: przecinek jako separator, kropka dziesiętna, UTF-8, nagłówek zgodny z tabelą
-- [ ] `radplume run-batch` i `radplume validation` bez błędów
-
-Jeśli plik źródłowy ma inną strukturę niż opisana (np. wiele arkuszy Excela albo japońskie
-nagłówki), wrzuć oryginał do `_zrodlo/` i pokaż fragment. Można wtedy dopisać parser
-bezpośrednio pod oryginalny format zamiast przekształcać go ręcznie.
-
----
-
-## 6. Licencje i dobre praktyki
-
-- Dane z `data/` **nie trafiają do repozytorium** (`.gitignore`). Każdy zbiór ma własną licencję:
-  Open-Meteo CC BY 4.0, GeoNames CC BY 4.0, Safecast CC0, JAEA wg warunków serwisu.
-  Źródła wymień w README/write-upie.
-- **Nie wpisuj ręcznie „przykładowych” wartości udających pomiary.** Walidacja na
-  zmyślonych liczbach jest gorsza niż jej brak. Przykładowe wiersze w tym dokumencie służą
-  wyłącznie do pokazania formatu.
-- Zmiana pliku w `landing/` → uruchom ponownie odpowiedni krok. Kroki są idempotentne,
-  więc ponowne uruchomienie nie dubluje danych.
+- [ ] Nowy rok archiwum: id z `Content-Disposition`, dopisany w `gios.yaml` i `run.archive_years`.
+- [ ] Nowe źródło lub plik: oryginał bez zmian w landing, przetworzona wersja obok.
+- [ ] Znaczniki czasu: koniec czy początek godziny, CET czy czas lokalny — konwersja tylko w `timeutil`, z testem.
+- [ ] Jednostki wymuszone w żądaniu **i** sprawdzone w odpowiedzi.
+- [ ] Nagłówki plików GIOŚ: jeśli GIOŚ je zmieni — zmiana w `smogcast.core.schema` (generator syntetyczny i bronze
+      korzystają z tego samego kontraktu, test integracyjny to wyłapie).
+- [ ] Cechy modelu: tylko informacja dostępna w chwili prognozy (D, 12:00 CET) — test braku wycieku w
+      `silver_transform/tests`.
