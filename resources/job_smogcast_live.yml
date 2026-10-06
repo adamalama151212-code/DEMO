@@ -1,0 +1,113 @@
+# =============================================================================
+# Lakeflow Job — live path (stream cleaning, station registry CDC, tomorrow's forecast).
+# SKELETON for stage E9; deployed with the bundle, schedule PAUSED until the PROD demo.
+#
+# One task = one step = one wheel (decision D14). The task graph mirrors LIVE_ORDER in
+# packages/cli/src/smogcast/cli/main.py — keep both in sync. Needs a trained model
+# (the batch job, resources/job_smogcast.yml) before the first forecast.
+#
+# Hourly: every run polls the GIOŚ API (the API only keeps ~3 days, so a gap in polling
+# loses data) and refreshes tomorrow's forecast. The forecast uses only hours 00–10 CET of
+# today (decision D6), so from the ~12:00 CET run on it no longer changes during the day,
+# unless GIOŚ corrects yesterday's values.
+# In E9 the pm-stream task may be replaced by the declarative Lakeflow pipeline (same logic).
+# =============================================================================
+resources:
+  jobs:
+    smogcast_live:
+      name: smogcast-live-${var.env}
+
+      schedule:
+        quartz_cron_expression: "0 15 * * * ?"   # every hour at :15 (GIOŚ publishes ~20 min after the hour)
+        timezone_id: Europe/Warsaw
+        pause_status: PAUSED
+
+      max_concurrent_runs: 1   # two overlapping runs would share the stream checkpoint
+
+      job_clusters:
+        - job_cluster_key: live
+          new_cluster:
+            spark_version: 17.3.x-scala2.13   # DBR 17 = Spark 4.0 (as locally) — 17.3 LTS
+            # per target (databricks.yml, variable node_type)
+            node_type_id: ${var.node_type}
+            num_workers: 0                    # single node: the live data is a few thousand rows
+            spark_conf:
+              spark.master: "local[*]"
+              spark.databricks.cluster.profile: singleNode
+            custom_tags: {ResourceClass: SingleNode}
+            data_security_mode: SINGLE_USER   # required for Unity Catalog
+            # The owner of a single-user cluster must be the identity the Job runs as: the deployer on DEV
+            # (development mode), the service principal on PROD (run_as in databricks.yml; CI deploys as it).
+            single_user_name: ${workspace.current_user.userName}
+            spark_env_vars:
+              SMOGCAST_ENV: ${var.env}
+
+      tasks:
+        # --- station registry (CDC) ---
+        - task_key: ingest_gios_registry
+          job_cluster_key: live
+          python_wheel_task: {package_name: smogcast_ingest, entry_point: smogcast-ingest, parameters: ["--step", "gios-registry", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/ingest/dist/*.whl}]
+
+        - task_key: bronze_station_snapshots
+          depends_on: [{task_key: ingest_gios_registry}]
+          job_cluster_key: live
+          python_wheel_task: {package_name: smogcast_bronze, entry_point: smogcast-bronze, parameters: ["--step", "station-snapshots", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/bronze/dist/*.whl}]
+
+        - task_key: silver_stations_scd2
+          depends_on: [{task_key: bronze_station_snapshots}]
+          job_cluster_key: live
+          python_wheel_task: {package_name: smogcast_silver_clean, entry_point: smogcast-silver-clean, parameters: ["--step", "stations-scd2", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/silver_clean/dist/*.whl}]
+
+        # --- live measurements ---
+        - task_key: ingest_gios_live
+          depends_on: [{task_key: ingest_gios_registry}]   # polls the sensors of the newest snapshot
+          job_cluster_key: live
+          python_wheel_task: {package_name: smogcast_ingest, entry_point: smogcast-ingest, parameters: ["--step", "gios-live", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/ingest/dist/*.whl}]
+
+        - task_key: silver_clean_pm_stream
+          depends_on: [{task_key: ingest_gios_live}, {task_key: silver_stations_scd2}]   # station → city from the registry
+          job_cluster_key: live
+          python_wheel_task: {package_name: smogcast_silver_clean, entry_point: smogcast-silver-clean, parameters: ["--step", "pm-stream", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/silver_clean/dist/*.whl}]
+
+        # --- weather forecast for tomorrow ---
+        - task_key: ingest_weather_live
+          job_cluster_key: live
+          python_wheel_task: {package_name: smogcast_ingest, entry_point: smogcast-ingest, parameters: ["--step", "weather-forecast-live", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/ingest/dist/*.whl}]
+
+        - task_key: bronze_weather
+          depends_on: [{task_key: ingest_weather_live}]
+          job_cluster_key: live
+          python_wheel_task: {package_name: smogcast_bronze, entry_point: smogcast-bronze, parameters: ["--step", "weather-forecast", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/bronze/dist/*.whl}]
+
+        - task_key: silver_weather_daily
+          depends_on: [{task_key: bronze_weather}]
+          job_cluster_key: live
+          python_wheel_task: {package_name: smogcast_silver_transform, entry_point: smogcast-silver-transform, parameters: ["--step", "weather-daily", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/silver_transform/dist/*.whl}]
+
+        # --- tomorrow's forecast ---
+        - task_key: silver_features_live
+          depends_on: [{task_key: silver_clean_pm_stream}, {task_key: silver_weather_daily}]
+          job_cluster_key: live
+          python_wheel_task: {package_name: smogcast_silver_transform, entry_point: smogcast-silver-transform, parameters: ["--step", "features-live", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/silver_transform/dist/*.whl}]
+
+        - task_key: model_forecast
+          depends_on: [{task_key: silver_features_live}]
+          job_cluster_key: live
+          python_wheel_task: {package_name: smogcast_model, entry_point: smogcast-model, parameters: ["--step", "forecast", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/model/dist/*.whl}]
+
+        # --- data-quality summary for the dashboard ---
+        - task_key: gold_dq_summary
+          depends_on: [{task_key: silver_clean_pm_stream}]
+          job_cluster_key: live
+          python_wheel_task: {package_name: smogcast_gold, entry_point: smogcast-gold, parameters: ["--step", "dq-summary", "--env", "${var.env}"]}
+          libraries: [{whl: ../packages/core/dist/*.whl}, {whl: ../packages/gold/dist/*.whl}]

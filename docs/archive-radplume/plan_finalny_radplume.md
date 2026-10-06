@@ -34,6 +34,9 @@ oraz plan wdrożenia na Databricks (DEV → PROD przez CI/CD).
 | P19 | dashboard AI/BI z osadzonymi poświadczeniami pokazuje wszystkim wiersze autora — RLS „nie działa” na demo; app działa jako SP | publikacja **bez embed credentials**; Databricks App z autoryzacją on-behalf-of-user | 4.6, 4.7, 4.8 |
 | P20 | skala PROD 200×200×72h×500×3 = ~4,3 mld obliczeń — sprzeczne z „nie celuj w miliardy”; trial DEV może wygasnąć przed demo | PROD: siatka 100×100 po 2 km (±100 km), 200 epizodów × 5 wariantów fizycznych × 2 nuklidy; Q jako mnożnik (liniowość modelu); koszt DEV po trialu doliczony | 3.4, 4.2, V |
 | P21 | test API Open-Meteo (Lubiatowo, 01–02.01.2020): wiatr domyślnie w **km/h**; kierunek to konwencja meteorologiczna (**skąd** wieje); `elevation: 0.0` także z `cell_selection=land` — przybliżone współrzędne leżą na linii brzegowej; brak zmiennych do klasy Pasquilla | jednostka wymuszona w zapytaniu i sprawdzana w bronze; kierunek smugi = kierunek wiatru + 180° z testem; współrzędne z dokumentów PEJ; pełna lista zmiennych | 2.4.1, 3.2, 3.3 |
+| P22 | emisja w epizodzie zawsze równomierna (1/N na godzinę) — nie da się odtworzyć zrzutów Fukushimy ani zapytać o „wyciek o 13:00 i drugi o 16:00” | harmonogram uwolnienia jako ułamki całości per godzina (`silver.release_schedule`), ilość per zestaw scenariuszy (`silver.source_terms`); walidacja 2011 z pliku Katata 2015 | docs/plan-rozszerzen.md, etap 1 |
+| P23 | Monte Carlo odpowiada tylko na „nie wiadomo, kiedy” (klimatologia) | tryb zdarzenia `radplume event`: jeden dzień, znane zrzuty, zespół z zaburzoną pogodą (kierunek ±15°, prędkość ±20%) jako `scenario_set = event_…` | docs/plan-rozszerzen.md, etap 2 |
+| P24 | każda godzina uwolnienia to prosta smuga — chmura nie skręca, choć przez 5 h lotu wiatr się zmienia | model obłoków (`silver/puff.py`): trajektorie co 15 min, depozycja z odcinka analitycznie (× ΔΦ); przy stałym wietrze zgodny ze smugą (< 1%) | docs/plan-rozszerzen.md, etap 3 |
 
 ---
 

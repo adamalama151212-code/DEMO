@@ -1,0 +1,24 @@
+# =============================================================================
+# DEV environment — Databricks DEV workspace. Same code as locally; only the
+# storage location (Unity Catalog + volume) changes.
+# =============================================================================
+storage:
+  mode: catalog
+  catalog: smogcast_dev
+  # Unity Catalog volume for raw files (landing). On Databricks /Volumes/... paths
+  # behave like a regular file system, so ingest code (open(), Path) works unchanged.
+  landing_root: /Volumes/smogcast_dev/raw/landing
+  checkpoint_root: /Volumes/smogcast_dev/raw/checkpoints
+  # Saved Spark ML models (MLflow registry is an optional upgrade in stage E9).
+  models_root: /Volumes/smogcast_dev/raw/models
+
+spark: {}
+
+run:
+  cities: [warszawa, krakow, wroclaw, lodz, poznan, gdansk, szczecin, bydgoszcz, lublin, bialystok]
+  archive_years: [2021, 2022, 2023, 2024, 2025]
+  seed: 42
+
+sources:
+  pm: gios
+  weather: open_meteo

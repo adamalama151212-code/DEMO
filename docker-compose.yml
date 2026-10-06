@@ -1,0 +1,36 @@
+# Usage: docker compose run --rm smogcast smogcast steps
+services:
+  smogcast:
+    build: .
+    image: smogcast:local
+    working_dir: /app
+    # The repository is mounted: code changes work without rebuilding the image
+    # (packages are installed in editable mode) and results (data/) land on your disk.
+    volumes:
+      - .:/app
+    environment:
+      SMOGCAST_ENV: local
+      # LM Studio (or any OpenAI-compatible server) running on the host machine.
+      SMOGCAST_LLM_BASE_URL: ${SMOGCAST_LLM_BASE_URL:-http://host.docker.internal:1234/v1}
+      SMOGCAST_LLM_MODEL: ${SMOGCAST_LLM_MODEL:-auto}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # Docker Desktop has it already; needed on Linux
+    # Spark UI (http://localhost:4040) — works with `docker compose run --service-ports ...`.
+    ports:
+      - "4040:4040"
+
+  # Web interface: `docker compose up app`  →  http://localhost:8501
+  app:
+    image: smogcast:local
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      SMOGCAST_ENV: local
+      SMOGCAST_LLM_BASE_URL: ${SMOGCAST_LLM_BASE_URL:-http://host.docker.internal:1234/v1}
+      SMOGCAST_LLM_MODEL: ${SMOGCAST_LLM_MODEL:-auto}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8501:8501"   # this machine only — the app talks to your local model
+    command: ["smogcast-app", "ui"]
