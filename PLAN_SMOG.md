@@ -581,8 +581,8 @@ demo usterek na Databricks w E9.
       Wykrył 2 błędy: parser metadanych w bronze (krótsze wiersze xlsx → `IndexError`; poprawione) i liczbę stacji w
       generatorze. Brak wycieku sprawdza istniejący test jednostkowy cech.
 - [x] Scenariusz demo jakości danych: `docs/demo-jakosc-danych.md` (kroki, SQL, co powiedzieć, pytania).
-- [x] CI (`.github/workflows/ci.yml`) przygotowane: uruchamia się przy pushu **każdej** gałęzi (wcześniej tylko `main` i PR),
-      ręcznie (`workflow_dispatch`) i przy PR do `main`; osobne kroki „Unit tests” (131) i „Integration test” (6);
+- [x] CI (`.github/workflows/ci.yml`) przygotowane: uruchamia się przy PR do `main`, pushu na `main` i ręcznie
+      (`workflow_dispatch`) — push na każdą gałąź dublował przebiegi z PR (zmiana po pierwszym pushu autora); osobne kroki „Unit tests” (131) i „Integration test” (6);
       jawna ścieżka pamięci podręcznej pip (`requirements-dev.txt` + `packages/*/pyproject.toml` — domyślnie `setup-python`
       szuka `requirements.txt`, którego nie ma); anulowanie starszego przebiegu tej samej gałęzi.
       **Symulacja w czystym kontenerze** (`python:3.11` + Java 17, tylko pliki widoczne dla gita, kroki jak w `ci.yml`):
@@ -597,7 +597,7 @@ demo usterek na Databricks w E9.
 - Commity do odtworzenia: `chore: remove legacy radplume modules`, `refactor(core): GIOŚ file format labels as a shared contract`,
   `fix(bronze): metadata rows shorter than the header`, `feat(ingest): deterministic synthetic inputs in source formats`,
   `test: end-to-end integration on synthetic data`, `docs: data-quality demo script`,
-  `ci: run on every branch, separate unit and integration steps`,
+  `ci: separate unit and integration steps, manual runs`,
   `docs: README, how-to-read and data preparation for smogcast`, `docs: architecture — tests, CI and environments`
 
 ### E9. Databricks (wymagania kursu) ☐
@@ -865,7 +865,8 @@ Wpisy najnowsze na dole.
   do wypowiedzi na demo w `docs/ulepszenia-pm10.md`.
   — Następny krok: autor wpisuje adres DEV, instaluje Databricks CLI, uruchamia bootstrap → próbny deploy na DEV.
 - 2026-10-06 — E8 (dokumentacja, CI) — Pełny `README.md`, nowe `docs/HOWTOREAD.md` i `docs/przygotowanie-danych.md`,
-  `docs/ARCHITECTURE.md` uzupełniony o testy/CI i środowiska. CI: push każdej gałęzi + `workflow_dispatch`, osobne kroki
+  `docs/ARCHITECTURE.md` uzupełniony o testy/CI i środowiska. CI: PR i push na `main` + `workflow_dispatch` (push każdej gałęzi dublował przebiegi z PR — poprawione po
+  pierwszym pushu autora), osobne kroki
   testów jednostkowych (131) i integracyjnego (6), jawna ścieżka pamięci podręcznej pip (bez `requirements.txt` krok
   `setup-python` mógłby się wywalić). **Symulacja CI w czystym kontenerze** (tylko pliki widoczne dla gita — wyłapałaby
   plik potrzebny testom, a ignorowany przez `.gitignore`): ruff czysto, **137/137 w 4,5 min**, 9 wheeli. Uwaga: w

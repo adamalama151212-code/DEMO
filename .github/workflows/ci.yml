@@ -10,13 +10,13 @@
 name: ci
 
 on:
-  # Every branch: a push is enough to get a run (also before a pull request exists).
   push:
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
 
-# A newer push to the same branch makes the older run pointless.
+# A newer push to the same branch or pull request makes the older run pointless.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true

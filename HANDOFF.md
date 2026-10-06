@@ -51,7 +51,7 @@ Testy na koniec sesji: **137/137** (w tym test integracyjny 6/6), ruff czysto �
 ## 2. Co zostało do zrobienia (proponowana kolejność)
 
 ### 2.1 Dokończ E8 — tylko zielone CI na GitHubie
-- `ci.yml` (2026-10-06): push **każdej** gałęzi + `workflow_dispatch` + PR do `main`; kroki: ruff → „Unit tests” (131)
+- `ci.yml` (2026-10-06): PR do `main` + push na `main` + `workflow_dispatch` (push każdej gałęzi dublował przebiegi z PR); kroki: ruff → „Unit tests” (131)
   → „Integration test” (6) → budowa 9 wheeli; jawne `cache-dependency-path` (brak `requirements.txt`).
 - Symulacja w czystym kontenerze `python:3.11` + Java 17 z plikami widocznymi dla gita: 137/137 w 4,5 min.
 - **W lokalnym repo nic ze smogcast nie jest zacommitowane** (ostatni commit = radplume) — CI zobaczy kod dopiero po
